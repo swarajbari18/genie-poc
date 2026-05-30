@@ -24,6 +24,9 @@ try {
 let contract: any
 let threads: any[] = []
 let signers: any[] = []
+let versions: any[] = []
+let documentUrl: string | null = null
+let nextAction: string = 'none'
 let contacts: any[] = []
 
 try {
@@ -35,6 +38,9 @@ try {
   contract = body.contract
   threads = body.threads ?? []
   signers = body.signers ?? []
+  versions = body.versions ?? []
+  documentUrl = body.documentUrl ?? null
+  nextAction = body.nextAction ?? 'none'
 } catch {
   return Astro.redirect('/dashboard')
 }
@@ -49,19 +55,6 @@ try {
   }
 } catch {
   contacts = []
-}
-
-let versions: any[] = []
-try {
-  const versionsRes = await fetch(`${apiUrl}/api/contracts/${id}/versions`, {
-    headers: { cookie: cookieHeader },
-  })
-  if (versionsRes.ok) {
-    const body = await versionsRes.json()
-    versions = body.versions ?? []
-  }
-} catch {
-  versions = []
 }
 
 // HTML editing — only for AI-generated drafts that have htmlContent stored
@@ -101,6 +94,9 @@ const isDeclined = contract.status === 'declined'
 // ── Condition helpers ────────────────────────────────────────────────────────
 const showSendForm    = contract.status === 'draft'
 const showAwaitingCard = ['sent', 'ai_processing'].includes(contract.status)
+const counterpartyFirstName = contract.recipientName?.split(' ')[0] ?? 'them'
+const remainingSigners = signers.filter((s: any) => s.status !== 'signed').length
+
 const showAISpinner   = contract.status === 'ai_processing'
 const showUnderReview = ['received', 'replied', 'negotiating'].includes(contract.status)
 const showSigningRoster = ['out_for_signature', 'partially_signed'].includes(contract.status)
@@ -260,7 +256,7 @@ const userInitial = firstInitial(user?.name, user?.email)
         </div>
 
         {/* Stage Indicator Strip — right side on desktop, below title on mobile */}
-        <div class="stage-strip" role="list" aria-label="Contract stages">
+        <div class={`stage-strip${showCompleted ? ' stage-strip--signed' : ''}`} role="list" aria-label="Contract stages">
           {STAGES.map((stage) => {
             const isCompleted = currentStage > stage.num
             const isActive    = currentStage === stage.num
@@ -297,6 +293,36 @@ const userInitial = firstInitial(user?.name, user?.email)
 
       {/* ── LEFT COLUMN — Document / Actions ────────────────────────────────── */}
       <div class="col-left">
+
+        {/* ── Next-action banner ────────────────────────────────────────────── */}
+        {nextAction !== 'none' && (
+          <div class={`next-action-banner next-action-banner--${nextAction}`}>
+            <span class="next-action-banner__text">
+              {nextAction === 'awaiting_your_review' && `It's your turn — review the proposed changes.`}
+              {nextAction === 'awaiting_their_reply' && `Sent. Waiting on ${counterpartyFirstName} to reply.`}
+              {nextAction === 'ready_to_send_signature' && `Review complete. Ready to send for signature.`}
+              {nextAction === 'awaiting_you_sign' && `It's your turn — sign to execute.`}
+              {nextAction === 'awaiting_them_sign' && `Waiting on ${remainingSigners === 1 ? '1 person' : `${remainingSigners} people`} to sign.`}
+              {nextAction === 'executed' && `Executed. All parties have signed.`}
+              {nextAction === 'declined' && `${counterpartyFirstName} declined. You can revise and resend.`}
+            </span>
+            {nextAction === 'awaiting_your_review' && (
+              <a href="#threadSection" class="next-action-banner__cta">Review changes</a>
+            )}
+            {nextAction === 'ready_to_send_signature' && (
+              <a href="#signingSection" class="next-action-banner__cta">Send for signature</a>
+            )}
+            {nextAction === 'awaiting_you_sign' && (
+              <button id="nextActionSignBtn" class="next-action-banner__cta">Sign now</button>
+            )}
+            {nextAction === 'executed' && (
+              <button id="nextActionDownloadBtn" class="next-action-banner__cta">Download PDF</button>
+            )}
+            {nextAction === 'declined' && (
+              <a href="#replySection" class="next-action-banner__cta">Reply</a>
+            )}
+          </div>
+        )}
 
         {/* Document metadata card */}
         <section class="card meta-card">
@@ -346,22 +372,32 @@ const userInitial = firstInitial(user?.name, user?.email)
                 </button>
               )}
             </div>
-            <a
-              href="#"
-              class="doc-viewer__download attachment"
-              data-key={contract.storageKey}
-              title="Download PDF"
-            >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                <path d="M12 3v13m0 0-4-4m4 4 4-4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                <path d="M3 20h18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-              </svg>
-              Download
-            </a>
+            {showCompleted && contract.signedStorageKey ? (
+              <button id="downloadSignedBtn" class="doc-viewer__download doc-viewer__download--signed" title="Download executed PDF">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                  <path d="M12 3v13m0 0-4-4m4 4 4-4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                  <path d="M3 20h18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                </svg>
+                Download executed
+              </button>
+            ) : (
+              <a
+                href="#"
+                class="doc-viewer__download attachment"
+                data-key={contract.storageKey}
+                title="Download PDF"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                  <path d="M12 3v13m0 0-4-4m4 4 4-4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                  <path d="M3 20h18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                </svg>
+                Download
+              </a>
+            )}
           </div>
 
-          {/* PDF iframe — src set via JS using signed URL */}
-          <div class="doc-viewer__body" id="docBodyPdf">
+          {/* PDF iframe — src baked at SSR time; no client-side fetch needed */}
+          <div class="doc-viewer__body" id="docBodyPdf" data-document-url={documentUrl ?? ''}>
             <div class="doc-viewer__loading" id="docPdfLoading">
               <div class="doc-viewer__spinner"></div>
               <span>Loading document…</span>
@@ -625,6 +661,7 @@ const userInitial = firstInitial(user?.name, user?.email)
 
             {/* Unified Send surface — signature mode */}
             {showSigningForm && (
+              <div id="signingSection" style="scroll-margin-top:1rem">
               <section class="send-card send-card--ready card" id="signatureSendCard" data-expanded="true">
                 <div class="send-card__expanded">
                   <div class="send-card__expanded-head">
@@ -731,6 +768,7 @@ const userInitial = firstInitial(user?.name, user?.email)
                   </form>
                 </div>
               </section>
+              </div>
             )}
           </>
         )}
@@ -775,19 +813,6 @@ const userInitial = firstInitial(user?.name, user?.email)
           )
         })()}
 
-        {/* COMPLETED / SIGNED */}
-        {showCompleted && (
-          <section class="card status-card status-card--signed completed-card">
-            <div class="completed-card__seal" aria-hidden="true">✓</div>
-            <h2 class="signed-heading">Contract Executed</h2>
-            <p class="card-subtext">All parties have signed. The final document is ready to download.</p>
-            <p id="downloadError" class="error-banner"></p>
-            <button id="downloadSignedBtn" class="btn-primary download-signed-btn">
-              Download Executed PDF
-            </button>
-          </section>
-        )}
-
         {/* DECLINED */}
         {showDeclined && (
           <section class="card status-card status-card--declined">
@@ -811,7 +836,7 @@ const userInitial = firstInitial(user?.name, user?.email)
       </div>{/* /col-left */}
 
       {/* ── RIGHT COLUMN — Activity / Thread ────────────────────────────────── */}
-      <div class="col-right">
+      <div class="col-right" id="threadSection">
 
         <h2 class="thread-heading">Activity</h2>
 
@@ -898,7 +923,7 @@ const userInitial = firstInitial(user?.name, user?.email)
 
         {/* Reply Composer — chat-style, sticky bottom */}
         {showReplyComposer && (
-          <div class="composer">
+          <div class="composer" id="replySection">
             <form id="replyForm" class="composer__form">
               <textarea
                 id="replyText"
@@ -1012,6 +1037,12 @@ const userInitial = firstInitial(user?.name, user?.email)
     overflow-x: auto;
     flex: 0 1 auto;
     max-width: 100%;
+    transition: border-color 0.2s ease, box-shadow 0.2s ease;
+  }
+
+  .stage-strip--signed {
+    border-color: #16a34a;
+    box-shadow: 0 0 0 2px #dcfce7, var(--shadow-card);
   }
 
   @media (min-width: 768px) {
@@ -1094,6 +1125,57 @@ const userInitial = firstInitial(user?.name, user?.email)
     color: #991B1B;
     font-weight: var(--font-weight-semibold);
   }
+
+  /* ── Next-action banner ────────────────────────────────────────────────── */
+  .next-action-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 0.625rem 0.875rem;
+    border-radius: var(--radius-card);
+    font-size: 0.83rem;
+    font-weight: var(--font-weight-medium);
+    border: 1px solid transparent;
+    background: var(--color-bg-subtle, #f9fafb);
+    border-color: var(--color-border-default);
+    color: var(--color-text-secondary);
+  }
+  .next-action-banner--awaiting_your_review,
+  .next-action-banner--awaiting_you_sign,
+  .next-action-banner--ready_to_send_signature {
+    background: #eff6ff;
+    border-color: #bfdbfe;
+    color: #1d4ed8;
+  }
+  .next-action-banner--executed {
+    background: #f0fdf4;
+    border-color: #bbf7d0;
+    color: #15803d;
+  }
+  .next-action-banner--declined {
+    background: #fef2f2;
+    border-color: #fecaca;
+    color: #b91c1c;
+  }
+  .next-action-banner__text {
+    flex: 1;
+  }
+  .next-action-banner__cta {
+    flex-shrink: 0;
+    font-size: 0.78rem;
+    font-weight: var(--font-weight-semibold);
+    padding: 0.25rem 0.625rem;
+    border-radius: var(--radius-pill);
+    border: 1px solid currentColor;
+    background: none;
+    color: inherit;
+    cursor: pointer;
+    text-decoration: none;
+    white-space: nowrap;
+    transition: opacity 0.15s;
+  }
+  .next-action-banner__cta:hover { opacity: 0.75; text-decoration: none; }
 
   /* ── Two-column body ───────────────────────────────────────────────────── */
   .contract-body {
@@ -1235,6 +1317,16 @@ const userInitial = firstInitial(user?.name, user?.email)
     border-color: var(--color-accent);
     color: var(--color-accent);
     text-decoration: none;
+  }
+  .doc-viewer__download--signed {
+    background: none;
+    cursor: pointer;
+    border-color: #16a34a;
+    color: #16a34a;
+  }
+  .doc-viewer__download--signed:hover {
+    border-color: #15803d;
+    color: #15803d;
   }
 
   .doc-viewer__body {
@@ -2612,32 +2704,31 @@ const userInitial = firstInitial(user?.name, user?.email)
       if (activeBody) activeBody.hidden = false
     }
 
-    // Load PDF via signed URL
-    async function loadPdf() {
+    // Load PDF — URL baked at SSR time, no fetch needed
+    function loadPdf() {
       if (!frame) return
+      const docBody = document.getElementById('docBodyPdf')
+      const url = docBody?.dataset.documentUrl ?? ''
+      if (!url) {
+        if (loading) loading.hidden = true
+        if (errEl) errEl.hidden = false
+        return
+      }
       if (loading) loading.hidden = false
       frame.hidden = true
       if (errEl) errEl.hidden = true
-      try {
-        const res = await fetch(`${apiUrl}/api/contracts/${contractId}/download-url`, { credentials: 'include' })
-        if (!res.ok) throw new Error('failed')
-        const { url } = await res.json()
-        frame.src = url
-        frame.addEventListener('load', () => {
-          if (loading) loading.hidden = true
-          frame.hidden = false
-        }, { once: true })
-        // Fallback if iframe load event doesn't fire (some browsers block PDF iframes)
-        setTimeout(() => {
-          if (loading && !loading.hidden) {
-            loading.hidden = true
-            frame.hidden = false
-          }
-        }, 3000)
-      } catch {
+      frame.src = url
+      frame.addEventListener('load', () => {
         if (loading) loading.hidden = true
-        if (errEl) errEl.hidden = false
-      }
+        frame.hidden = false
+      }, { once: true })
+      // Fallback if iframe load event doesn't fire (some browsers block PDF iframes)
+      setTimeout(() => {
+        if (loading && !loading.hidden) {
+          loading.hidden = true
+          frame.hidden = false
+        }
+      }, 3000)
     }
 
     loadPdf()
@@ -3025,21 +3116,26 @@ const userInitial = firstInitial(user?.name, user?.email)
   //    allowed inside this inline `define:vars` script.
 
   // ── Download Signed PDF ────────────────────────────────────────────────────
-  const downloadSignedBtn = document.getElementById('downloadSignedBtn');
-  if (downloadSignedBtn) {
-    downloadSignedBtn.addEventListener('click', async () => {
-      const downloadError = document.getElementById('downloadError');
-      if (downloadError) { downloadError.textContent = ''; downloadError.style.display = 'none'; }
-      const res = await fetch(`${apiUrl}/api/contracts/${contractId}/signed-document`, {
-        credentials: 'include',
-      });
-      if (res.ok) {
-        const { url } = await res.json();
-        window.open(url, '_blank');
-      } else {
-        if (downloadError) { downloadError.textContent = 'Failed to get signed document'; downloadError.style.display = 'block'; }
-      }
+  async function fetchAndOpenSignedDoc() {
+    const res = await fetch(`${apiUrl}/api/contracts/${contractId}/signed-document`, {
+      credentials: 'include',
     });
+    if (res.ok) {
+      const { url } = await res.json();
+      window.open(url, '_blank');
+    }
+  }
+
+  const downloadSignedBtn = document.getElementById('downloadSignedBtn');
+  if (downloadSignedBtn) downloadSignedBtn.addEventListener('click', fetchAndOpenSignedDoc);
+
+  const nextActionDownloadBtn = document.getElementById('nextActionDownloadBtn');
+  if (nextActionDownloadBtn) nextActionDownloadBtn.addEventListener('click', fetchAndOpenSignedDoc);
+
+  const nextActionSignBtn = document.getElementById('nextActionSignBtn');
+  const signNowBtnAlt = document.getElementById('signNowBtn');
+  if (nextActionSignBtn && signNowBtnAlt) {
+    nextActionSignBtn.addEventListener('click', () => signNowBtnAlt.click());
   }
 
   // ── Send for Review ────────────────────────────────────────────────────────

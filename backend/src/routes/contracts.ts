@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import { requireAuth } from '../middleware/auth.js'
-import { contractsBucket, generateDownloadSignedUrl } from '../lib/storage.js'
+import { contractsBucket, generateDownloadSignedUrl, GcsSigningError } from '../lib/storage.js'
 import { htmlToPdf, buildHtmlShell } from '../services/pdfGenerate.js'
 import { sendContractEmail, sendReplyEmail } from '../services/postmarkClient.js'
 import {
@@ -213,7 +213,8 @@ contractsRouter.get('/:id', requireAuth, async (c) => {
       c.created_at          AS "createdAt",
       c.updated_at          AS "updatedAt",
       t_agg.threads,
-      s_agg.signers
+      s_agg.signers,
+      v_agg.versions
     FROM contracts c
     LEFT JOIN LATERAL (
       SELECT COALESCE(
@@ -258,6 +259,24 @@ contractsRouter.get('/:id', requireAuth, async (c) => {
       FROM contract_signers s
       WHERE s.contract_id = c.id
     ) s_agg ON true
+    LEFT JOIN LATERAL (
+      SELECT COALESCE(
+        json_agg(
+          jsonb_build_object(
+            'id',            v.id,
+            'versionNumber', v.version_number,
+            'authoredBy',    v.authored_by,
+            'htmlContent',   v.html_content,
+            'storageKey',    v.storage_key,
+            'message',       v.message,
+            'createdAt',     v.created_at
+          ) ORDER BY v.version_number ASC
+        ),
+        '[]'::json
+      ) AS versions
+      FROM contract_versions v
+      WHERE v.contract_id = c.id
+    ) v_agg ON true
     WHERE c.id = ${contractId}
       AND (
         c.user_id = ${user.id}
@@ -296,10 +315,57 @@ contractsRouter.get('/:id', requireAuth, async (c) => {
     updatedAt: row.updatedAt,
   }
 
+  let documentUrl: string | null = null
+  try {
+    // Serve the signed PDF when available — it is the canonical document at that stage
+    const storageKey = row.signedStorageKey ?? row.storageKey
+    documentUrl = await generateDownloadSignedUrl(storageKey, row.originalFilename, 3600, 'inline')
+  } catch {
+    // GCS signing unavailable — frontend falls back to the download link
+  }
+
+  const signersList: Array<{ genieUserId: string | null; status: string }> = row.signers ?? []
+  const isOwner = row.userId === user.id
+  const mySignerEntry = signersList.find((s) => s.genieUserId === user.id)
+  const status = row.status as string
+  const origin = row.origin as string
+
+  type NextAction =
+    | 'awaiting_your_review'
+    | 'awaiting_their_reply'
+    | 'ready_to_send_signature'
+    | 'awaiting_you_sign'
+    | 'awaiting_them_sign'
+    | 'executed'
+    | 'declined'
+    | 'none'
+
+  let nextAction: NextAction = 'none'
+  if (status === 'draft') {
+    nextAction = 'none'
+  } else if (['sent', 'ai_processing'].includes(status) && isOwner) {
+    nextAction = 'awaiting_their_reply'
+  } else if (origin === 'received' && ['received', 'replied', 'negotiating'].includes(status)) {
+    nextAction = 'awaiting_your_review'
+  } else if (['replied', 'negotiating'].includes(status) && isOwner) {
+    nextAction = 'ready_to_send_signature'
+  } else if (['out_for_signature', 'partially_signed'].includes(status) && mySignerEntry && mySignerEntry.status !== 'signed') {
+    nextAction = 'awaiting_you_sign'
+  } else if (['out_for_signature', 'partially_signed'].includes(status)) {
+    nextAction = 'awaiting_them_sign'
+  } else if (['signed', 'completed'].includes(status)) {
+    nextAction = 'executed'
+  } else if (status === 'declined') {
+    nextAction = 'declined'
+  }
+
   return c.json({
     contract,
     threads: row.threads ?? [],
     signers: row.signers ?? [],
+    versions: row.versions ?? [],
+    documentUrl,
+    nextAction,
   })
 })
 
@@ -624,7 +690,13 @@ contractsRouter.get('/:id/download-url', requireAuth, async (c) => {
     if (!signerRow) return c.json({ error: 'Not found' }, 404)
   }
 
-  const url = await generateDownloadSignedUrl(contract.storageKey, contract.originalFilename)
+  let url: string
+  try {
+    url = await generateDownloadSignedUrl(contract.storageKey, contract.originalFilename, 3600, 'inline')
+  } catch (err) {
+    if (err instanceof GcsSigningError) return c.json({ error: 'Document signing unavailable — check server credentials' }, 503)
+    throw err
+  }
   c.header('Cache-Control', 'no-store')
   return c.json({ url, expiresIn: 3600 })
 })
@@ -943,10 +1015,21 @@ contractsRouter.get('/:id/versions', requireAuth, async (c) => {
   const user = c.get('user')
   const contractId = c.req.param('id')
 
-  const contract = await db.query.contracts.findFirst({
-    where: and(eq(contracts.id, contractId), eq(contracts.userId, user.id)),
-  })
-  if (!contract) return c.json({ error: 'Not found' }, 404)
+  // Mirror the GET /:id auth: allow owner OR signer/participant
+  const rows = await db.execute(sql`
+    SELECT c.id FROM contracts c
+    WHERE c.id = ${contractId}
+      AND (
+        c.user_id = ${user.id}
+        OR EXISTS (
+          SELECT 1 FROM contract_signers cs
+          WHERE cs.contract_id = c.id
+            AND cs.genie_user_id = ${user.id}
+            AND cs.status IN ('pending', 'sent', 'viewed', 'signed', 'declined')
+        )
+      )
+  `)
+  if (rows.length === 0) return c.json({ error: 'Not found' }, 404)
 
   const versions = await db.query.contractVersions.findMany({
     where: eq(contractVersions.contractId, contractId),

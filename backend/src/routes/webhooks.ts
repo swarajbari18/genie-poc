@@ -683,7 +683,16 @@ async function processInbound(inboundId: string, payload: any) {
     const senderEmail = payload.FromFull?.Email ?? payload.From ?? ''
     const senderName = payload.FromFull?.Name ?? null
     const subject = payload.Subject ?? '(no subject)'
-    const title = firstAttachment?.filename || subject || 'Received contract'
+    // Prefer subject with Genie suffix stripped; fall back to title-cased filename
+    const cleanSubject = subject.split(' — ')[0].trim()
+    const cleanFilename = firstAttachment?.filename
+      ? firstAttachment.filename
+          .replace(/\.pdf$/i, '')
+          .replace(/[-_]+/g, ' ')
+          .replace(/\b\w/g, (ch: string) => ch.toUpperCase())
+          .trim()
+      : null
+    const title = (cleanSubject && cleanSubject !== '(no subject)') ? cleanSubject : (cleanFilename ?? 'Received contract')
 
     await db.insert(contracts).values({
       id: receivedContractId,
