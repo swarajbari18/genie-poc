@@ -1,0 +1,32 @@
+{
+  "name": "frontend",
+  "type": "module",
+  "version": "0.0.1",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview",
+    "astro": "astro",
+    "generate-types": "wrangler types"
+  },
+  "dependencies": {
+    "@astrojs/check": "^0.9.9",
+    "@astrojs/cloudflare": "^13.5.4",
+    "@astrojs/react": "^5.0.5",
+    "@types/react": "^19.2.15",
+    "@types/react-dom": "^19.2.3",
+    "astro": "^6.3.7",
+    "lucide-react": "^1.16.0",
+    "react": "^19.2.6",
+    "react-diff-viewer-continued": "^4.2.2",
+    "react-dom": "^19.2.6",
+    "typescript": "^6.0.3",
+    "wrangler": "^4.94.0"
+  },
+  "overrides": {
+    "vite": "^7"
+  }
+}

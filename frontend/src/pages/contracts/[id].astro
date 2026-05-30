@@ -1,0 +1,3449 @@
+---
+import AppLayout from '../../layouts/AppLayout.astro'
+import DiffViewer from '../../components/DiffViewer.tsx'
+
+const { id } = Astro.params
+const apiUrl = import.meta.env.PUBLIC_API_URL || 'http://localhost:8080'
+const cookieHeader = Astro.request.headers.get('cookie') ?? ''
+
+let currentUserId: string | null = null
+let user: any = null
+try {
+  const sessionRes = await fetch(`${apiUrl}/api/auth/get-session`, {
+    headers: { cookie: cookieHeader },
+  })
+  if (!sessionRes.ok) return Astro.redirect('/')
+  const session = await sessionRes.json()
+  if (!session?.user) return Astro.redirect('/')
+  currentUserId = session.user.id
+  user = session.user
+} catch {
+  return Astro.redirect('/?error=service_unavailable')
+}
+
+let contract: any
+let threads: any[] = []
+let signers: any[] = []
+let contacts: any[] = []
+
+try {
+  const res = await fetch(`${apiUrl}/api/contracts/${id}`, {
+    headers: { cookie: cookieHeader },
+  })
+  if (!res.ok) return Astro.redirect('/dashboard')
+  const body = await res.json()
+  contract = body.contract
+  threads = body.threads ?? []
+  signers = body.signers ?? []
+} catch {
+  return Astro.redirect('/dashboard')
+}
+
+try {
+  const contactsRes = await fetch(`${apiUrl}/api/contacts`, {
+    headers: { cookie: cookieHeader },
+  })
+  if (contactsRes.ok) {
+    const body = await contactsRes.json()
+    contacts = body.contacts ?? []
+  }
+} catch {
+  contacts = []
+}
+
+let versions: any[] = []
+try {
+  const versionsRes = await fetch(`${apiUrl}/api/contracts/${id}/versions`, {
+    headers: { cookie: cookieHeader },
+  })
+  if (versionsRes.ok) {
+    const body = await versionsRes.json()
+    versions = body.versions ?? []
+  }
+} catch {
+  versions = []
+}
+
+// HTML editing — only for AI-generated drafts that have htmlContent stored
+const v1Version = versions.find((v: any) => v.versionNumber === 1 && v.authoredBy === 'owner')
+const v1HtmlContent: string | null = v1Version?.htmlContent ?? null
+const showEditTab = contract.status === 'draft' && !!v1HtmlContent
+
+// If v1 (owner) and v2+ (counterparty) both exist, show the version diff
+const ownerVersion = versions.find((v: any) => v.versionNumber === 1)
+const latestCounterpartyVersion = [...versions]
+  .filter((v: any) => v.authoredBy === 'counterparty')
+  .sort((a: any, b: any) => b.versionNumber - a.versionNumber)[0] ?? null
+const showVersionDiff = !!(ownerVersion && latestCounterpartyVersion)
+
+// ── Stage mapping (SSR) ──────────────────────────────────────────────────────
+function getStage(status: string): number {
+  if (status === 'draft') return 1
+  if (['sent', 'ai_processing'].includes(status)) return 2
+  if (['received', 'replied', 'negotiating'].includes(status)) return 3
+  if (['out_for_signature', 'partially_signed'].includes(status)) return 4
+  if (['completed', 'signed'].includes(status)) return 5
+  if (status === 'declined') return 3
+  return 1
+}
+
+const STAGES = [
+  { num: 1, label: 'Draft' },
+  { num: 2, label: 'Sent' },
+  { num: 3, label: 'Under Review' },
+  { num: 4, label: 'Signing' },
+  { num: 5, label: 'Executed' },
+]
+
+const currentStage = getStage(contract.status)
+const isDeclined = contract.status === 'declined'
+
+// ── Condition helpers ────────────────────────────────────────────────────────
+const showSendForm    = contract.status === 'draft'
+const showAwaitingCard = ['sent', 'ai_processing'].includes(contract.status)
+const showAISpinner   = contract.status === 'ai_processing'
+const showUnderReview = ['received', 'replied', 'negotiating'].includes(contract.status)
+const showSigningRoster = ['out_for_signature', 'partially_signed'].includes(contract.status)
+const showSigningForm = ['replied', 'negotiating'].includes(contract.status) && contract.origin !== 'received'
+const showCompleted   = ['completed', 'signed'].includes(contract.status)
+const showDeclined    = contract.status === 'declined'
+
+const showReplyComposer =
+  ['replied', 'negotiating'].includes(contract.status) ||
+  (contract.origin === 'received' && ['received', 'replied', 'negotiating'].includes(contract.status))
+
+const mySignerRow = signers.find(
+  (s: any) => s.genieUserId === currentUserId && ['pending', 'sent', 'viewed'].includes(s.status)
+)
+
+type SuggestedPerson = {
+  key: string
+  label: string
+  name: string
+  email: string
+  role: 'creator' | 'counterparty' | 'other'
+}
+
+const suggestedPeople: SuggestedPerson[] = []
+const seenPeople = new Set<string>()
+function addSuggestedPerson(person: Omit<SuggestedPerson, 'key'>) {
+  const email = person.email?.trim()
+  if (!email) {
+    return
+  }
+  const key = email.toLowerCase()
+  if (seenPeople.has(key)) {
+    return
+  }
+  seenPeople.add(key)
+  suggestedPeople.push({ ...person, key })
+}
+
+addSuggestedPerson({
+  label: 'Me',
+  name: user?.name || user?.email || 'Me',
+  email: user?.email || '',
+  role: 'creator',
+})
+addSuggestedPerson({
+  label: 'Counterparty',
+  name: contract.recipientName || contract.recipientEmail || '',
+  email: contract.recipientEmail || '',
+  role: 'counterparty',
+})
+contacts.forEach((contact) => {
+  addSuggestedPerson({
+    label: contact.name || contact.email,
+    name: contact.name || contact.email,
+    email: contact.email,
+    role: 'other',
+  })
+})
+
+const reviewSuggestions = suggestedPeople.filter((p) => p.role !== 'creator').slice(0, 6)
+const signingSuggestions = suggestedPeople.slice(0, 8)
+const initialSignerRows = signingSuggestions.filter((p) => p.role === 'creator' || p.role === 'counterparty').slice(0, 2)
+if (initialSignerRows.length === 0) {
+  initialSignerRows.push({ key: 'blank', label: '', name: '', email: '', role: 'counterparty' })
+}
+
+// ── Signer display data (computed here to avoid TS generics in JSX) ──────────
+const signerLabelMap: Record<string, string> = {
+  pending:  'Pending',
+  sent:     'Waiting…',
+  viewed:   'Viewed',
+  signed:   'Signed ✓',
+  declined: 'Declined ✗',
+}
+const signerBadgeClassMap: Record<string, string> = {
+  signed:   'signer-badge--signed',
+  declined: 'signer-badge--declined',
+  viewed:   'signer-badge--viewed',
+}
+const signersDisplay = signers.map((s: any) => ({
+  id:         s.id,
+  signerName: s.signerName,
+  signerEmail: s.signerEmail,
+  status:     s.status,
+  label:      signerLabelMap[s.status] ?? s.status,
+  badgeClass: signerBadgeClassMap[s.status] ?? 'badge-muted',
+}))
+
+// Format date helper
+function fmtDate(iso: string): string {
+  if (!iso) return ''
+  try {
+    return new Date(iso).toLocaleString('en-US', {
+      month: 'short', day: 'numeric', year: 'numeric',
+      hour: 'numeric', minute: '2-digit'
+    })
+  } catch {
+    return iso
+  }
+}
+
+// Short date for thread bubble timestamps: "Jan 3 · 2:45 PM"
+function fmtShortDate(iso: string): string {
+  if (!iso) return ''
+  try {
+    const d = new Date(iso)
+    const date = d.toLocaleString('en-US', { month: 'short', day: 'numeric' })
+    const time = d.toLocaleString('en-US', { hour: 'numeric', minute: '2-digit' })
+    return `${date} · ${time}`
+  } catch {
+    return iso
+  }
+}
+
+// First initial helper for avatar circles
+function firstInitial(...candidates: Array<string | undefined | null>): string {
+  for (const c of candidates) {
+    if (c && typeof c === 'string' && c.trim().length > 0) {
+      return c.trim()[0].toUpperCase()
+    }
+  }
+  return '?'
+}
+
+const userInitial = firstInitial(user?.name, user?.email)
+---
+<AppLayout title={`${contract.title} — Genie AI`} user={user} apiUrl={apiUrl}>
+  <main class="contract-main" data-current-status={contract.status} data-contract-id={id}>
+
+    <p id="attachmentError" class="error-banner" aria-live="polite"></p>
+
+    {/* ── Header ────────────────────────────────────────────────────────────── */}
+    <div class="page-header">
+      <a href="/dashboard" class="back-link">← All Contracts</a>
+
+      <div class="page-header__row">
+        <div class="page-header__lead">
+          <h1 class="page-title">
+            {contract.title}
+            {contract.origin === 'received' && (
+              <span class="badge badge-warning received-badge">RECEIVED</span>
+            )}
+          </h1>
+          {(contract.recipientName || contract.recipientEmail) && (
+            <p class="page-header__counter">
+              {contract.recipientName ? (
+                <>
+                  <span class="page-header__counter-name">{contract.recipientName}</span>
+                  {contract.recipientEmail && <span class="page-header__counter-dot"> · </span>}
+                  {contract.recipientEmail && <span class="page-header__counter-email">{contract.recipientEmail}</span>}
+                </>
+              ) : (
+                <span class="page-header__counter-email">{contract.recipientEmail}</span>
+              )}
+            </p>
+          )}
+        </div>
+
+        {/* Stage Indicator Strip — right side on desktop, below title on mobile */}
+        <div class="stage-strip" role="list" aria-label="Contract stages">
+          {STAGES.map((stage) => {
+            const isCompleted = currentStage > stage.num
+            const isActive    = currentStage === stage.num
+            const isDeclinedStage = isDeclined && stage.num === 3
+
+            let circleClass = 'stage-circle'
+            if (isDeclinedStage) circleClass += ' stage-circle--declined'
+            else if (isCompleted) circleClass += ' stage-circle--completed'
+            else if (isActive)    circleClass += ' stage-circle--active'
+            else                  circleClass += ' stage-circle--future'
+
+            let labelClass = 'stage-label'
+            if (isDeclinedStage) labelClass += ' stage-label--declined'
+            else if (isActive)   labelClass += ' stage-label--active'
+
+            return (
+              <div class="stage-item" role="listitem">
+                {stage.num > 1 && (
+                  <div class={`stage-connector ${isCompleted || isActive ? 'stage-connector--filled' : ''}`} />
+                )}
+                <div class={circleClass}>
+                  {isCompleted && !isDeclined ? '✓' : String(stage.num)}
+                </div>
+                <span class={labelClass}>{stage.label}</span>
+              </div>
+            )
+          })}
+        </div>
+      </div>
+    </div>
+
+    {/* ── Two-Column Body ───────────────────────────────────────────────────── */}
+    <div class="contract-body">
+
+      {/* ── LEFT COLUMN — Document / Actions ────────────────────────────────── */}
+      <div class="col-left">
+
+        {/* Document metadata card */}
+        <section class="card meta-card">
+          <div class="meta-card__inner">
+            <div class="meta-field">
+              <span class="meta-label">Contract</span>
+              <span class="meta-value">{contract.title}</span>
+            </div>
+            {contract.recipientName && (
+              <div class="meta-field">
+                <span class="meta-label">Recipient</span>
+                <span class="meta-value">{contract.recipientName}</span>
+              </div>
+            )}
+            {contract.recipientEmail && (
+              <div class="meta-field">
+                <span class="meta-label">Email</span>
+                <span class="meta-value">{contract.recipientEmail}</span>
+              </div>
+            )}
+            {contract.storageKey && (
+              <div class="meta-field">
+                <span class="meta-label">Original PDF</span>
+                <a href="#" class="attachment meta-attachment">
+                  📎 Download Original
+                </a>
+              </div>
+            )}
+          </div>
+        </section>
+
+        {/* ── Document viewer — always visible ─────────────────────── */}
+        <section class="doc-viewer card" id="docViewer">
+          <div class="doc-viewer__head">
+            <div class="doc-viewer__tabs" role="tablist">
+              <button class="doc-viewer__tab doc-viewer__tab--active" id="docTabPdf" role="tab" aria-selected="true">
+                Document
+              </button>
+              {showEditTab && (
+                <button class="doc-viewer__tab" id="docTabEdit" role="tab" aria-selected="false">
+                  Edit
+                </button>
+              )}
+              {showVersionDiff && (
+                <button class="doc-viewer__tab" id="docTabChanges" role="tab" aria-selected="false">
+                  v{latestCounterpartyVersion!.versionNumber} · Their changes
+                </button>
+              )}
+            </div>
+            <a
+              href="#"
+              class="doc-viewer__download attachment"
+              data-key={contract.storageKey}
+              title="Download PDF"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path d="M12 3v13m0 0-4-4m4 4 4-4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                <path d="M3 20h18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+              </svg>
+              Download
+            </a>
+          </div>
+
+          {/* PDF iframe — src set via JS using signed URL */}
+          <div class="doc-viewer__body" id="docBodyPdf">
+            <div class="doc-viewer__loading" id="docPdfLoading">
+              <div class="doc-viewer__spinner"></div>
+              <span>Loading document…</span>
+            </div>
+            <iframe
+              id="docPdfFrame"
+              class="doc-viewer__iframe"
+              title="Contract document"
+              hidden
+            ></iframe>
+            <div class="doc-viewer__error" id="docPdfError" hidden>
+              <p>Could not load the PDF preview.</p>
+              <a href="#" class="attachment" data-key={contract.storageKey}>📎 Download PDF instead</a>
+            </div>
+          </div>
+
+          {/* HTML editor — draft AI-generated contracts only */}
+          {showEditTab && (
+            <div class="doc-viewer__body doc-viewer__body--editor" id="docBodyEdit" hidden>
+              <div class="doc-editor">
+                <div class="doc-editor__toolbar">
+                  <span id="editSaveStatus" class="edit-save-status"></span>
+                  <button type="button" id="editSaveBtn" class="btn-primary btn-sm">Save changes</button>
+                </div>
+                <div
+                  id="docEditorContent"
+                  class="doc-editor__content"
+                  contenteditable="true"
+                  spellcheck="false"
+                ></div>
+              </div>
+            </div>
+          )}
+
+          {/* Counterparty diff */}
+          {showVersionDiff && (
+            <div class="doc-viewer__body" id="docBodyChanges" hidden>
+              <div class="doc-diff-wrap">
+                <DiffViewer
+                  oldText={ownerVersion!.text}
+                  newText={latestCounterpartyVersion!.text}
+                  client:visible
+                />
+              </div>
+            </div>
+          )}
+        </section>
+
+        {/* DRAFT — unified Send surface */}
+        {showSendForm && (
+          <section class="send-card card" id="sendCard" data-expanded="false">
+            {/* Collapsed view */}
+            <div class="send-card__collapsed">
+              <div class="send-card__icon" aria-hidden="true">
+                <svg width="32" height="32" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <path d="M3 7l9 6 9-6" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+                  <path d="M3 7v10a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+                  <path d="M3 7l9-4 9 4" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+                </svg>
+              </div>
+              <div class="send-card__copy">
+                <h2 class="send-card__heading">Send</h2>
+                <p class="send-card__body">Choose who should receive this contract. Genie keeps the next step simple.</p>
+              </div>
+              <button type="button" id="sendExpandBtn" class="btn-primary send-card__cta">Send</button>
+            </div>
+
+            {/* Expanded composer */}
+            <div class="send-card__expanded">
+              <div class="send-card__expanded-head">
+                <h2 class="send-card__heading">Send</h2>
+                <button type="button" id="sendCollapseBtn" class="send-card__collapse" aria-label="Collapse">Collapse ↑</button>
+              </div>
+              <div class="send-mode" aria-label="Send mode">
+                <button type="button" class="send-mode__option send-mode__option--active">Review</button>
+                <button type="button" class="send-mode__option" disabled>Signature</button>
+              </div>
+              <p class="send-mode__hint">Signature opens after review, once the document is ready.</p>
+              <form id="sendForm" class="send-form">
+                <label class="form-label">To</label>
+
+                <div id="recipientRows" class="signer-cards">
+                  <div class="signer-card">
+                    <div class="signer-card__row">
+                      <input type="text"  name="recipientName[]"  placeholder="Name"            class="form-input" autocomplete="off" />
+                      <input type="email" name="recipientEmail[]" placeholder="name@company.com" class="form-input" autocomplete="off" required />
+                    </div>
+                    <button type="button" class="signer-card__remove" aria-label="Remove recipient" hidden>×</button>
+                  </div>
+                </div>
+
+                {reviewSuggestions.length > 0 && (
+                  <div class="people-strip" aria-label="Suggested recipients">
+                    {reviewSuggestions.map((person) => (
+                      <button
+                        type="button"
+                        class="person-chip"
+                        data-fill-recipient
+                        data-person-name={person.name}
+                        data-person-email={person.email}
+                      >
+                        <span class="person-chip__label">{person.label}</span>
+                        <span class="person-chip__email">{person.email}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+                <button type="button" id="addRecipientBtn" class="add-signer-btn">+ Add another recipient</button>
+
+                <div class="send-preview" aria-label="Email preview">
+                  <div class="send-preview__head">
+                    Subject: <span class="send-preview__subj">{contract.title} — Review Requested</span>
+                  </div>
+                  <div class="send-preview__body">
+                    Hi <span id="sendPreviewName" class="send-preview__var">there</span>,
+                    {'\n\n'}
+                    {(user?.name ?? user?.email ?? 'A Genie user')} has sent you a contract to review via Genie AI.
+                    {'\n\n'}
+                    Contract: {contract.title}
+                    {'\n\n'}
+                    Please review the attached PDF and reply to this email with your feedback or a revised version.
+                    {'\n\n'}
+                    — Genie AI
+                  </div>
+                </div>
+
+                <p id="sendError" class="error-banner"></p>
+                <div class="send-form__actions">
+                  <button type="submit" id="sendBtn" class="btn-primary">Send</button>
+                  <button type="button" id="sendCancelBtn" class="btn-ghost">Cancel</button>
+                </div>
+              </form>
+            </div>
+          </section>
+        )}
+
+        {/* SENT / AI_PROCESSING — Awaiting Response */}
+        {showAwaitingCard && (
+          <>
+            <section class="card awaiting-card">
+              <div class="awaiting-card__icon" aria-hidden="true">
+                <svg width="32" height="32" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.6"/>
+                  <path d="M12 7v5l3 2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </div>
+              <div class="awaiting-card__copy">
+                <h2 class="awaiting-card__heading">Awaiting {contract.recipientName || 'a reply'}'s reply</h2>
+                <p class="awaiting-card__sub">
+                  Sent to <span class="awaiting-card__email">{contract.recipientEmail}</span>
+                  {contract.sentAt && <> · {fmtDate(contract.sentAt)}</>}
+                </p>
+                <p class="card-subtext awaiting-card__hint">You'll be notified here when they respond. No action needed.</p>
+              </div>
+            </section>
+
+            {showAISpinner && (
+              <div class="ai-processing-pill" role="status">
+                <div class="spinner"></div>
+                <span>Analysing their changes…</span>
+              </div>
+            )}
+          </>
+        )}
+
+        {/* UNDER REVIEW — Info card + optional AI analysis */}
+        {showUnderReview && (
+          <>
+            {/* AI Analysis (if available) */}
+            {contract.aiAnalysis ? (
+              <section class="card ai-card">
+                <div class="ai-card__header">
+                  <div class="ai-card__title-row">
+                    <span class="badge ai-badge">AI</span>
+                    <h2 class="card-heading">What changed</h2>
+                  </div>
+                  <div class="diff-stats">
+                    <span class="diff-stat diff-stat--add">
+                      +{contract.aiAnalysis.stats.additions} added
+                    </span>
+                    <span class="diff-stat diff-stat--del">
+                      -{contract.aiAnalysis.stats.deletions} removed
+                    </span>
+                    {contract.aiAnalysis.stats.unchanged != null && (
+                      <span class="diff-stat diff-stat--unch">
+                        {contract.aiAnalysis.stats.unchanged} unchanged
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                {contract.aiAnalysis.summaryStatus === 'ok' ? (
+                  <div class="ai-summary">
+                    {contract.aiAnalysis.summary}
+                  </div>
+                ) : (
+                  <p class="card-subtext">
+                    {contract.aiAnalysis.summaryStatus === 'failed'
+                      ? 'Plain-English summary unavailable — see the diff below.'
+                      : 'AI summary is disabled (no API key). See the deterministic diff below.'}
+                  </p>
+                )}
+
+                <details class="diff-details">
+                  <summary class="diff-summary">View full diff (word-level)</summary>
+                  <div class="diff-viewer-wrap">
+                    <DiffViewer
+                      oldText={contract.aiAnalysis.oldText}
+                      newText={contract.aiAnalysis.newText}
+                      client:visible
+                    />
+                  </div>
+                </details>
+
+                <div class="ai-card__footer">
+                  <a href="#" class="attachment" data-key={contract.aiAnalysis.toStorageKey}>
+                    📎 Download Their Version (PDF)
+                  </a>
+                  <span class="diff-note">Diff is computed from extracted text; formatting may vary.</span>
+                </div>
+              </section>
+            ) : showVersionDiff ? null : (
+              <section class="card status-card status-card--success">
+                <strong>Contract Under Review.</strong> The counterparty's reply is in the thread.
+              </section>
+            )}
+
+            {/* Version diff — from review workspace */}
+            {showVersionDiff && (
+              <section class="card ai-card">
+                <div class="ai-card__header">
+                  <div class="ai-card__title-row">
+                    <span class="badge ai-badge">v{latestCounterpartyVersion.versionNumber}</span>
+                    <h2 class="card-heading">Proposed changes</h2>
+                  </div>
+                  <p class="card-subtext" style="margin:0">
+                    Submitted via review workspace
+                    {latestCounterpartyVersion.message && ` · ${latestCounterpartyVersion.message}`}
+                  </p>
+                </div>
+
+                <details class="diff-details" open>
+                  <summary class="diff-summary">View version diff (text-level)</summary>
+                  <div class="diff-viewer-wrap">
+                    <DiffViewer
+                      oldText={ownerVersion.text}
+                      newText={latestCounterpartyVersion.text}
+                      client:visible
+                    />
+                  </div>
+                </details>
+
+                <div class="ai-card__footer">
+                  <span class="diff-note">
+                    v1 = original document · v{latestCounterpartyVersion.versionNumber} = counterparty proposed changes
+                  </span>
+                </div>
+              </section>
+            )}
+
+            {/* Unified Send surface — signature mode */}
+            {showSigningForm && (
+              <section class="send-card send-card--ready card" id="signatureSendCard" data-expanded="true">
+                <div class="send-card__expanded">
+                  <div class="send-card__expanded-head">
+                    <div>
+                      <h2 class="send-card__heading">Send</h2>
+                      <p class="send-card__body">The review step is complete. Prepare the signature request when everyone is aligned.</p>
+                    </div>
+                  </div>
+                  <div class="send-mode" aria-label="Send mode">
+                    <button type="button" class="send-mode__option" disabled>Review</button>
+                    <button type="button" class="send-mode__option send-mode__option--active">Signature</button>
+                  </div>
+                  <form id="signForm">
+                    {/* Step 1 — Who needs to sign? */}
+                    <div id="signing-step-1" class="wizard-step">
+                      <div class="wizard-head">
+                        <span class="wizard-pip wizard-pip--active">1</span>
+                        <span class="wizard-pip">2</span>
+                        <span class="wizard-step-label">Who needs to sign?</span>
+                      </div>
+
+                      <div id="signerRows" class="signer-cards">
+                        {initialSignerRows.map((person) => (
+                          <div class="signer-card">
+                            <div class="signer-card__row">
+                              <input type="text" name="signerName[]" placeholder="Name"
+                                class="form-input" value={person.name} required />
+                              <input type="email" name="signerEmail[]" placeholder="Email"
+                                class="form-input" value={person.email} required />
+                            </div>
+                            <div class="signer-card__row signer-card__row--meta">
+                              <select name="signerRole[]" class="form-input signer-card__role">
+                                <option value="counterparty" selected={person.role === 'counterparty'}>Counterparty</option>
+                                <option value="creator" selected={person.role === 'creator'}>Creator</option>
+                                <option value="other" selected={person.role === 'other'}>Other</option>
+                              </select>
+                              <button type="button" class="signer-card__remove" aria-label="Remove signer" hidden>×</button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                      {signingSuggestions.length > 0 && (
+                        <div class="people-strip people-strip--signers" aria-label="Suggested signers">
+                          {signingSuggestions.map((person) => (
+                            <button
+                              type="button"
+                              class="person-chip"
+                              data-add-signer
+                              data-person-name={person.name}
+                              data-person-email={person.email}
+                              data-person-role={person.role}
+                            >
+                              <span class="person-chip__label">{person.label}</span>
+                              <span class="person-chip__email">{person.email}</span>
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                      <button type="button" id="addSignerBtn" class="add-signer-btn">
+                        + Add another signer
+                      </button>
+
+                      <p id="signStep1Error" class="error-banner"></p>
+                      <div class="wizard-actions">
+                        <button type="button" id="signNextBtn" class="btn-primary">Continue</button>
+                      </div>
+                    </div>
+
+                    {/* Step 2 — Confirm */}
+                    <div id="signing-step-2" class="wizard-step" hidden>
+                      <div class="wizard-head">
+                        <span class="wizard-pip wizard-pip--done">1</span>
+                        <span class="wizard-pip wizard-pip--active">2</span>
+                        <span class="wizard-step-label">Confirm signing request</span>
+                      </div>
+
+                      <p class="card-subtext wizard-blurb">
+                        You're about to send this contract for legal e-signature.
+                        Dropbox Sign will email each signer with a link to review and sign the document.
+                      </p>
+
+                      <div class="wizard-summary">
+                        <span class="wizard-summary__label">Signers</span>
+                        <ul id="signersSummary" class="wizard-summary__list">
+                          {/* Populated on Next */}
+                        </ul>
+                      </div>
+
+                      <details class="wizard-note">
+                        <summary class="wizard-note__toggle">+ Add a note (optional)</summary>
+                        <textarea name="signMessage" rows="3" class="form-input wizard-note__input"
+                          placeholder="Please sign this agreement at your earliest convenience…"></textarea>
+                      </details>
+
+                      <p class="warning-notice">Once sent, the contract can no longer be edited.</p>
+
+                      <p id="signError" class="error-banner"></p>
+
+                      <div class="wizard-actions">
+                        <button type="button" id="signBackBtn" class="btn-ghost">← Back</button>
+                        <button type="submit" id="signSubmitBtn" class="btn-primary btn-lg">Prepare Signature</button>
+                      </div>
+                    </div>
+                  </form>
+                </div>
+              </section>
+            )}
+          </>
+        )}
+
+        {/* SIGNING ROSTER — out_for_signature or partially_signed */}
+        {showSigningRoster && (() => {
+          const signedCount = signers.filter((s: any) => s.status === 'signed').length
+          const totalCount  = signers.length || 1
+          const pct = Math.round((signedCount / totalCount) * 100)
+          return (
+            <section class="card form-card">
+              <div class="signing-progress">
+                <div class="signing-progress__head">
+                  <h2 class="card-heading" style="margin-bottom:0">Signature Request</h2>
+                  <span class="signing-progress__count">{signedCount} of {totalCount} signatures collected</span>
+                </div>
+                <div class="progress-bar">
+                  <div class="progress-bar__fill" style={`width:${pct}%`}></div>
+                </div>
+              </div>
+
+              {signersDisplay.length > 0 && (
+                <ul class="signer-timeline">
+                  {signersDisplay.map((s) => (
+                    <li class="signer-tl-item" data-signer-id={s.id} data-signer-status={s.status}>
+                      <span class={`signer-tl-dot signer-tl-dot--${s.status}`} aria-hidden="true">
+                        {s.status === 'signed' && '✓'}
+                        {s.status === 'declined' && '×'}
+                      </span>
+                      <div class="signer-tl-body">
+                        <div class="signer-name">{s.signerName}</div>
+                        <div class="signer-email">{s.signerEmail}</div>
+                      </div>
+                      <span class="signer-tl-status">{s.label}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+
+              <p class="card-subtext signing-foot">Signers receive an email from Dropbox Sign with a link to sign.</p>
+            </section>
+          )
+        })()}
+
+        {/* COMPLETED / SIGNED */}
+        {showCompleted && (
+          <section class="card status-card status-card--signed completed-card">
+            <div class="completed-card__seal" aria-hidden="true">✓</div>
+            <h2 class="signed-heading">Contract Executed</h2>
+            <p class="card-subtext">All parties have signed. The final document is ready to download.</p>
+            <p id="downloadError" class="error-banner"></p>
+            <button id="downloadSignedBtn" class="btn-primary download-signed-btn">
+              Download Executed PDF
+            </button>
+          </section>
+        )}
+
+        {/* DECLINED */}
+        {showDeclined && (
+          <section class="card status-card status-card--declined">
+            <h2 class="declined-heading">Contract Declined</h2>
+            <p class="card-subtext">The counterparty has declined this contract.</p>
+          </section>
+        )}
+
+        {/* Sign Now — for logged-in Genie user who is a signer */}
+        {mySignerRow && (
+          <section class="card status-card status-card--accent">
+            <h2 class="sign-now-heading">Your signature is required</h2>
+            <p class="card-subtext">
+              Click below to open the signing page. You will be redirected to Dropbox Sign.
+            </p>
+            <p id="signNowError" class="error-banner"></p>
+            <button id="signNowBtn" class="btn-primary">Sign Now</button>
+          </section>
+        )}
+
+      </div>{/* /col-left */}
+
+      {/* ── RIGHT COLUMN — Activity / Thread ────────────────────────────────── */}
+      <div class="col-right">
+
+        <h2 class="thread-heading">Activity</h2>
+
+        {/* Thread scroll area */}
+        <div class="thread-scroll">
+          {threads.length === 0 ? (
+            <div class="thread-empty">
+              <p class="card-subtext">No activity yet. The thread will appear here once the contract is sent.</p>
+            </div>
+          ) : (
+            threads.map((t: any) => {
+              if (t.direction === 'outbound') {
+                return (
+                  <div class="thread-row thread-row--outbound">
+                    <div class="thread-stack">
+                      <div class="thread-bubble thread-bubble--outbound">
+                        {t.subject && (
+                          <div class="thread-bubble__subject">{t.subject}</div>
+                        )}
+                        <div class="thread-bubble__body">
+                          {t.body || 'Sent with attachment.'}
+                        </div>
+                        {t.attachments && Array.isArray(t.attachments) && t.attachments.length > 0 && (
+                          <div class="thread-bubble__attachments">
+                            {t.attachments.map((a: any) => (
+                              <a href="#"
+                                class="attachment-chip"
+                                data-key={a.storageKey ?? a.storage_key}>
+                                📎 {a.filename ?? 'attachment.pdf'}
+                              </a>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                      <div class="thread-stamp">You · {fmtShortDate(t.emailDate)}</div>
+                    </div>
+                    <span class="avatar avatar--outbound" aria-hidden="true">{userInitial}</span>
+                  </div>
+                )
+              } else if (t.direction === 'inbound') {
+                const senderName = t.fromName || t.fromAddress || 'Counterparty'
+                const inboundInitial = firstInitial(t.fromName, t.fromAddress)
+                return (
+                  <div class="thread-row thread-row--inbound">
+                    <span class="avatar avatar--inbound" aria-hidden="true">{inboundInitial}</span>
+                    <div class="thread-stack">
+                      <div class="thread-bubble thread-bubble--inbound">
+                        {t.subject && (
+                          <div class="thread-bubble__subject">{t.subject}</div>
+                        )}
+                        <div class="thread-bubble__body">
+                          {t.body || 'Received with attachment.'}
+                        </div>
+                        {t.attachments && Array.isArray(t.attachments) && t.attachments.length > 0 && (
+                          <div class="thread-bubble__attachments">
+                            {t.attachments.map((a: any) => (
+                              <a href="#"
+                                class="attachment-chip"
+                                data-key={a.storageKey ?? a.storage_key}>
+                                📎 {a.filename ?? 'attachment.pdf'}
+                              </a>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                      <div class="thread-stamp">{senderName} · {fmtShortDate(t.emailDate)}</div>
+                    </div>
+                  </div>
+                )
+              } else {
+                /* system */
+                return (
+                  <div class="thread-system">
+                    <span class="thread-system__body">{t.body}</span>
+                    {t.emailDate && (
+                      <span class="thread-system__date">{fmtShortDate(t.emailDate)}</span>
+                    )}
+                  </div>
+                )
+              }
+            })
+          )}
+        </div>{/* /thread-scroll */}
+
+        {/* Reply Composer — chat-style, sticky bottom */}
+        {showReplyComposer && (
+          <div class="composer">
+            <form id="replyForm" class="composer__form">
+              <textarea
+                id="replyText"
+                name="message"
+                rows="3"
+                class="composer__text"
+                placeholder="Write your reply…"
+                required
+              ></textarea>
+              <div class="composer__foot">
+                <label class="composer__attach" for="replyFile">
+                  <input type="file" id="replyFile" name="file" accept="application/pdf" class="composer__file-input" />
+                  <span id="replyAttachLabel" class="composer__attach-label">📎 Attach revised PDF</span>
+                </label>
+                <button type="submit" id="replyBtn" class="btn-primary composer__send" disabled>
+                  Send Reply →
+                </button>
+              </div>
+              <p id="replyError" class="error-banner"></p>
+            </form>
+          </div>
+        )}
+
+      </div>{/* /col-right */}
+
+    </div>{/* /contract-body */}
+  </main>
+</AppLayout>
+
+<style>
+  /* ── Main container ────────────────────────────────────────────────────── */
+  .contract-main {
+    max-width: 1280px;
+    margin: 0 auto;
+    padding: 0 1.5rem 4rem;
+  }
+
+  /* ── Page header ───────────────────────────────────────────────────────── */
+  .page-header {
+    padding: 1.5rem 0 0;
+    margin-bottom: 1.75rem;
+  }
+
+  .page-header__row {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 1.5rem;
+    flex-wrap: wrap;
+    margin-top: 0.75rem;
+  }
+
+  .page-header__lead {
+    min-width: 0;
+    flex: 1 1 260px;
+  }
+
+  .page-title {
+    margin: 0;
+    font-size: 1.75rem;
+    font-weight: var(--font-weight-bold);
+    color: var(--color-text-primary);
+    line-height: 1.2;
+    letter-spacing: -0.01em;
+    display: flex;
+    align-items: center;
+    gap: 0.625rem;
+    flex-wrap: wrap;
+  }
+
+  .received-badge {
+    font-size: 0.42em;
+  }
+
+  .page-header__counter {
+    margin: 0.4rem 0 0;
+    font-size: 0.9rem;
+    color: var(--color-text-muted);
+  }
+
+  .page-header__counter-name {
+    color: var(--color-text-primary);
+    font-weight: var(--font-weight-semibold);
+  }
+
+  .page-header__counter-dot { color: var(--color-text-muted); }
+
+  .back-link {
+    font-size: 0.875rem;
+    color: var(--color-text-muted);
+    text-decoration: none;
+    white-space: nowrap;
+    display: inline-block;
+  }
+
+  .back-link:hover {
+    color: var(--color-accent);
+    text-decoration: underline;
+  }
+
+  /* ── Stage Indicator Strip ─────────────────────────────────────────────── */
+  .stage-strip {
+    display: flex;
+    align-items: flex-start;
+    gap: 0;
+    padding: 0.875rem 1.25rem;
+    background: var(--color-bg-white);
+    border: 1px solid var(--color-border-default);
+    border-radius: var(--radius-card);
+    box-shadow: var(--shadow-card);
+    overflow-x: auto;
+    flex: 0 1 auto;
+    max-width: 100%;
+  }
+
+  @media (min-width: 768px) {
+    .stage-strip { min-width: 460px; }
+  }
+
+  .stage-item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    position: relative;
+    flex: 1;
+    min-width: 72px;
+  }
+
+  .stage-connector {
+    position: absolute;
+    top: 16px; /* vertically centers with the 32px circle */
+    left: calc(-50% + 0px);
+    right: calc(50% + 16px);
+    height: 2px;
+    background: var(--color-border-default);
+    z-index: 0;
+  }
+
+  .stage-connector--filled {
+    background: var(--color-brand-mid);
+  }
+
+  .stage-circle {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.85rem;
+    font-weight: var(--font-weight-bold);
+    position: relative;
+    z-index: 1;
+    flex-shrink: 0;
+    transition: background 0.2s ease;
+  }
+
+  .stage-circle--active {
+    background: var(--color-accent);
+    color: #FFFFFF;
+  }
+
+  .stage-circle--completed {
+    background: var(--color-brand-mid);
+    color: #FFFFFF;
+  }
+
+  .stage-circle--future {
+    background: var(--color-border-default);
+    color: var(--color-text-muted);
+  }
+
+  .stage-circle--declined {
+    background: #FEE2E2;
+    color: #991B1B;
+  }
+
+  .stage-label {
+    font-size: 0.65rem;
+    margin-top: 0.4rem;
+    color: var(--color-text-muted);
+    text-align: center;
+    white-space: nowrap;
+    letter-spacing: 0.02em;
+  }
+
+  .stage-label--active {
+    color: var(--color-accent);
+    font-weight: var(--font-weight-semibold);
+  }
+
+  .stage-label--declined {
+    color: #991B1B;
+    font-weight: var(--font-weight-semibold);
+  }
+
+  /* ── Two-column body ───────────────────────────────────────────────────── */
+  .contract-body {
+    display: grid;
+    grid-template-columns: 60% 1fr;
+    gap: 1.75rem;
+    align-items: start;
+  }
+
+  @media (max-width: 767px) {
+    .contract-body {
+      grid-template-columns: 1fr;
+    }
+
+    .col-right {
+      order: 2;
+    }
+  }
+
+  /* ── Cards — shared ─────────────────────────────────────────────────────── */
+  .card {
+    margin-bottom: 1.25rem;
+  }
+
+  .card-heading {
+    margin-top: 0;
+    margin-bottom: 1rem;
+    font-size: 1.0625rem;
+    font-weight: var(--font-weight-bold);
+    color: var(--color-text-primary);
+  }
+
+  .card-subtext {
+    font-size: 0.9em;
+    color: var(--color-text-muted);
+    margin-top: 0.25rem;
+    margin-bottom: 0;
+  }
+
+  /* ── Metadata card ─────────────────────────────────────────────────────── */
+  .meta-card {
+    padding: 1.25rem 1.5rem;
+  }
+
+  .meta-card__inner {
+    display: flex;
+    flex-direction: column;
+    gap: 0.625rem;
+  }
+
+  .meta-field {
+    display: flex;
+    gap: 0.75rem;
+    align-items: baseline;
+    font-size: 0.9em;
+  }
+
+  .meta-label {
+    font-weight: var(--font-weight-semibold);
+    color: var(--color-text-muted);
+    min-width: 80px;
+    flex-shrink: 0;
+    text-transform: uppercase;
+    font-size: 0.72em;
+    letter-spacing: 0.04em;
+  }
+
+  .meta-value {
+    color: var(--color-text-primary);
+  }
+
+  .meta-attachment {
+    font-size: 0.85em;
+  }
+
+  /* ── Document viewer ───────────────────────────────────────────────────── */
+  .doc-viewer {
+    padding: 0;
+    overflow: hidden;
+    margin-bottom: 1.25rem;
+  }
+
+  .doc-viewer__head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.625rem 1rem;
+    background: var(--color-bg-subtle);
+    border-bottom: 1px solid var(--color-border-default);
+    gap: 0.75rem;
+  }
+
+  .doc-viewer__tabs {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.125rem;
+    padding: 0.2rem;
+    background: var(--color-border-default);
+    border-radius: var(--radius-pill);
+    flex: 1;
+  }
+
+  .doc-viewer__tab {
+    border: none;
+    background: transparent;
+    font: inherit;
+    font-size: 0.78rem;
+    font-weight: var(--font-weight-semibold);
+    color: var(--color-text-muted);
+    padding: 0.3rem 0.75rem;
+    border-radius: var(--radius-pill);
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+    white-space: nowrap;
+  }
+
+  .doc-viewer__tab--active {
+    background: var(--color-bg-white);
+    color: var(--color-text-primary);
+    box-shadow: var(--shadow-subtle);
+  }
+
+  .doc-viewer__download {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    font-size: 0.78rem;
+    font-weight: var(--font-weight-semibold);
+    color: var(--color-text-muted);
+    text-decoration: none;
+    padding: 0.3rem 0.625rem;
+    border: 1px solid var(--color-border-default);
+    border-radius: var(--radius-pill);
+    transition: border-color 0.15s, color 0.15s;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+  .doc-viewer__download:hover {
+    border-color: var(--color-accent);
+    color: var(--color-accent);
+    text-decoration: none;
+  }
+
+  .doc-viewer__body {
+    background: var(--color-bg-white);
+    position: relative;
+  }
+
+  .doc-viewer__iframe {
+    display: block;
+    width: 100%;
+    height: 600px;
+    border: none;
+    background: #fff;
+  }
+
+  .doc-viewer__loading {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.625rem;
+    height: 600px;
+    color: var(--color-text-muted);
+    font-size: 0.875rem;
+  }
+
+  .doc-viewer__spinner {
+    width: 20px; height: 20px;
+    border: 2px solid var(--color-border-default);
+    border-top-color: var(--color-accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    flex-shrink: 0;
+  }
+
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .doc-viewer__error {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 200px;
+    gap: 0.75rem;
+    color: var(--color-text-muted);
+    font-size: 0.875rem;
+    text-align: center;
+  }
+
+  .doc-diff-wrap {
+    font-size: 0.875rem;
+    padding: 1.25rem 1.5rem;
+    max-height: 600px;
+    overflow-y: auto;
+  }
+
+  /* ── Send-for-Review card (DRAFT → expand-in-place) ───────────────────── */
+  .send-card { padding: 0; overflow: hidden; }
+
+  .send-card__collapsed {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 1.25rem 1.5rem;
+  }
+  .send-card[data-expanded="true"] .send-card__collapsed { display: none; }
+  .send-card[data-expanded="false"] .send-card__expanded { display: none; }
+
+  .send-card__icon {
+    color: var(--color-accent);
+    background: var(--color-border-light);
+    width: 56px;
+    height: 56px;
+    border-radius: 50%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+
+  .send-card__copy { flex: 1; min-width: 0; }
+
+  .send-card__heading {
+    margin: 0 0 0.25rem;
+    font-size: 1.05rem;
+    font-weight: var(--font-weight-bold);
+    color: var(--color-text-primary);
+  }
+
+  .send-card__body {
+    margin: 0;
+    font-size: 0.9rem;
+    color: var(--color-text-muted);
+    line-height: 1.5;
+  }
+
+  .send-card__cta { flex-shrink: 0; }
+
+  .send-card__expanded {
+    padding: 1.25rem 1.5rem;
+    animation: send-expand 0.18s ease-out;
+  }
+  @keyframes send-expand {
+    from { opacity: 0; transform: translateY(-2px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  .send-card__expanded-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.875rem;
+  }
+
+  .send-card__collapse {
+    background: none;
+    border: none;
+    color: var(--color-text-muted);
+    font-size: 0.8rem;
+    cursor: pointer;
+    padding: 0.25rem 0.5rem;
+    border-radius: var(--radius-input);
+    transition: background 0.15s ease;
+  }
+  .send-card__collapse:hover { background: var(--color-bg-subtle); color: var(--color-text-primary); }
+
+  .send-card--ready .send-card__expanded-head {
+    margin-bottom: 0.75rem;
+  }
+
+  .send-mode {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 0.25rem;
+    margin-bottom: 0.75rem;
+    border-radius: var(--radius-pill);
+    background: var(--color-bg-subtle);
+    border: 1px solid var(--color-border-default);
+  }
+
+  .send-mode__option {
+    border: 0;
+    border-radius: var(--radius-pill);
+    background: transparent;
+    color: var(--color-text-muted);
+    font: inherit;
+    font-size: 0.84rem;
+    font-weight: var(--font-weight-semibold);
+    padding: 0.4rem 0.8rem;
+    min-width: 88px;
+  }
+
+  .send-mode__option--active {
+    background: var(--color-bg-white);
+    color: var(--color-text-primary);
+    box-shadow: var(--shadow-subtle);
+  }
+
+  .send-mode__option:disabled {
+    cursor: default;
+  }
+
+  .send-mode__hint {
+    margin: -0.25rem 0 0.75rem;
+    font-size: 0.82rem;
+    color: var(--color-text-muted);
+  }
+
+  .send-form { display: flex; flex-direction: column; gap: 0.625rem; }
+  .send-form__field { display: flex; flex-direction: column; gap: 0.4rem; }
+  .send-form__field .form-input { padding: 0.55rem 0.75rem; }
+
+  .people-strip {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin: 0.125rem 0 0.375rem;
+  }
+
+  .people-strip--signers {
+    margin-top: 0.25rem;
+  }
+
+  .person-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    max-width: 100%;
+    border: 1px solid var(--color-border-default);
+    background: var(--color-bg-white);
+    color: var(--color-text-primary);
+    border-radius: var(--radius-pill);
+    padding: 0.35rem 0.625rem;
+    font: inherit;
+    font-size: 0.82rem;
+    cursor: pointer;
+    transition: border-color 0.15s ease, background 0.15s ease;
+  }
+
+  .person-chip:hover {
+    border-color: var(--color-accent);
+    background: var(--color-bg-subtle);
+  }
+
+  .person-chip__label {
+    font-weight: var(--font-weight-semibold);
+    white-space: nowrap;
+  }
+
+  .person-chip__email {
+    color: var(--color-text-muted);
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .send-preview {
+    background: var(--color-bg-subtle);
+    border: 1px solid var(--color-border-default);
+    border-radius: var(--radius-input);
+    padding: 0.75rem 1rem;
+    font-size: 0.85em;
+    color: var(--color-text-muted);
+    margin-top: 0.375rem;
+  }
+
+  .send-preview__head {
+    font-size: 0.85em;
+    font-weight: var(--font-weight-semibold);
+    color: var(--color-text-primary);
+    margin-bottom: 0.5rem;
+    padding-bottom: 0.4rem;
+    border-bottom: 1px solid var(--color-border-default);
+  }
+
+  .send-preview__body {
+    white-space: pre-wrap;
+    line-height: 1.6;
+  }
+
+  .send-preview__var {
+    color: var(--color-accent);
+    font-weight: var(--font-weight-semibold);
+  }
+
+  .send-form__actions {
+    display: flex;
+    gap: 0.5rem;
+    margin-top: 0.5rem;
+  }
+
+  /* ── Awaiting card (SENT/AI_PROCESSING) ─────────────────────────────────── */
+  .awaiting-card {
+    display: flex;
+    gap: 1rem;
+    padding: 1.25rem 1.5rem;
+    align-items: flex-start;
+  }
+
+  .awaiting-card__icon {
+    color: var(--color-text-muted);
+    flex-shrink: 0;
+    margin-top: 0.125rem;
+  }
+
+  .awaiting-card__copy { flex: 1; min-width: 0; }
+
+  .awaiting-card__heading {
+    margin: 0 0 0.25rem;
+    font-size: 1rem;
+    font-weight: var(--font-weight-semibold);
+    color: var(--color-text-primary);
+  }
+
+  .awaiting-card__sub {
+    margin: 0 0 0.5rem;
+    font-size: 0.875rem;
+    color: var(--color-text-muted);
+  }
+
+  .awaiting-card__email {
+    color: var(--color-text-primary);
+    font-weight: var(--font-weight-semibold);
+  }
+
+  .awaiting-card__hint { margin: 0; }
+
+  .ai-processing-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.55rem 0.875rem;
+    background: var(--color-border-light);
+    border: 1px solid var(--color-border-mid);
+    border-radius: var(--radius-pill);
+    font-size: 0.85rem;
+    font-weight: var(--font-weight-semibold);
+    color: var(--color-brand-deep);
+    margin-bottom: 1.25rem;
+  }
+
+  /* ── Signing progress + timeline ─────────────────────────────────────────── */
+  .signing-progress { margin-bottom: 1.25rem; }
+
+  .signing-progress__head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 0.5rem;
+    margin-bottom: 0.625rem;
+    flex-wrap: wrap;
+  }
+
+  .signing-progress__count {
+    font-size: 0.8rem;
+    color: var(--color-text-muted);
+  }
+
+  .signer-timeline {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    border-left: 2px solid var(--color-border-default);
+    padding-left: 0.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.875rem;
+  }
+
+  .signer-tl-item {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    position: relative;
+    padding-left: 0.875rem;
+  }
+
+  .signer-tl-dot {
+    position: absolute;
+    left: -1.05rem;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--color-bg-white);
+    border: 2px solid var(--color-border-default);
+    font-size: 0.7rem;
+    font-weight: var(--font-weight-bold);
+    color: transparent;
+    flex-shrink: 0;
+  }
+
+  .signer-tl-dot--signed {
+    background: #16a34a;
+    border-color: #16a34a;
+    color: #FFFFFF;
+  }
+  .signer-tl-dot--viewed {
+    background: var(--color-border-light);
+    border-color: var(--color-accent);
+  }
+  .signer-tl-dot--declined {
+    background: #dc2626;
+    border-color: #dc2626;
+    color: #FFFFFF;
+  }
+
+  .signer-tl-body { flex: 1; min-width: 0; }
+
+  .signer-tl-status {
+    font-size: 0.8rem;
+    color: var(--color-text-muted);
+    font-weight: var(--font-weight-semibold);
+    flex-shrink: 0;
+  }
+
+  .signing-foot {
+    margin-top: 1rem;
+    font-size: 0.8rem;
+  }
+
+  /* ── Completed card polish ──────────────────────────────────────────────── */
+  .completed-card {
+    text-align: center;
+    padding: 1.75rem 1.5rem;
+  }
+
+  .completed-card__seal {
+    width: 56px;
+    height: 56px;
+    border-radius: 50%;
+    background: #DCFCE7;
+    color: #166534;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.6rem;
+    font-weight: var(--font-weight-bold);
+    margin: 0 auto 0.875rem;
+  }
+
+  /* ── Status cards ──────────────────────────────────────────────────────── */
+  .status-card {
+    padding: 1.25rem 1.5rem;
+  }
+
+  .status-card--accent {
+    border-left: 4px solid var(--color-accent);
+    background: var(--color-border-light);
+  }
+
+  .status-card--success {
+    border-left: 4px solid #16a34a;
+  }
+
+  .status-card--signed {
+    border-left: 4px solid #16a34a;
+    background: #f0fdf4;
+  }
+
+  .status-card--declined {
+    border-left: 4px solid #dc2626;
+    background: #FEF2F2;
+  }
+
+  .awaiting-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 1rem;
+  }
+
+  .awaiting-icon {
+    font-size: 1.5rem;
+    flex-shrink: 0;
+    line-height: 1;
+  }
+
+  .signed-heading {
+    color: #166534;
+    margin-top: 0;
+    margin-bottom: 0.75rem;
+    font-size: 1.0625rem;
+    font-weight: var(--font-weight-bold);
+  }
+
+  .download-signed-btn {
+    background: #16a34a;
+    margin-top: 0.5rem;
+  }
+
+  .download-signed-btn:hover {
+    background: #15803d;
+  }
+
+  .declined-heading {
+    color: #991B1B;
+    margin-top: 0;
+    margin-bottom: 0.5rem;
+    font-size: 1.0625rem;
+    font-weight: var(--font-weight-bold);
+  }
+
+  .sign-now-heading {
+    color: var(--color-brand-deep);
+    margin-top: 0;
+    margin-bottom: 0.5rem;
+    font-size: 1.0625rem;
+    font-weight: var(--font-weight-bold);
+  }
+
+  /* ── Spinner ─────────────────────────────────────────────────────────────── */
+  @keyframes spin {
+    from { transform: rotate(0deg); }
+    to   { transform: rotate(360deg); }
+  }
+
+  .spinner-row {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+  }
+
+  .spinner {
+    width: 20px;
+    height: 20px;
+    border: 2px solid var(--color-border-default);
+    border-top-color: var(--color-accent);
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+    flex-shrink: 0;
+  }
+
+  /* ── Skeleton placeholders (ai_processing state) ─────────────────────────── */
+  .skeleton-stack { display: flex; flex-direction: column; gap: 0.75rem; margin-bottom: 1.25rem; margin-top: 1rem; }
+  .skeleton--summary { height: 80px; }
+  .skeleton--diff { height: 300px; }
+
+  /* ── Form — shared ────────────────────────────────────────────────────────── */
+  .form-card {
+    padding: 1.25rem 1.5rem;
+  }
+
+  .form-field {
+    margin-bottom: 1rem;
+  }
+
+  .form-label {
+    display: block;
+    margin-bottom: 0.4rem;
+    font-size: 0.875rem;
+    font-weight: var(--font-weight-semibold);
+    color: var(--color-text-primary);
+  }
+
+  .form-input {
+    width: 100%;
+    padding: 0.5rem 0.75rem;
+    border: 1px solid var(--color-border-default);
+    border-radius: var(--radius-input);
+    font-family: var(--font-family-base);
+    font-size: 0.9375rem;
+    color: var(--color-text-primary);
+    background: var(--color-bg-white);
+    box-sizing: border-box;
+    transition: border-color 0.15s ease;
+  }
+
+  .form-input:focus {
+    outline: none;
+    border-color: var(--color-accent);
+    box-shadow: 0 0 0 3px var(--color-border-light);
+  }
+
+  textarea.form-input {
+    resize: vertical;
+  }
+
+  .file-input {
+    font-size: 0.85em;
+    padding: 0.4rem 0.5rem;
+  }
+
+  /* ── AI Analysis card ─────────────────────────────────────────────────── */
+  .ai-card {
+    padding: 1.25rem 1.5rem;
+    background: var(--color-border-light);
+    border: 1px solid var(--color-border-mid);
+  }
+
+  .ai-card__header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 1rem;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+
+  .ai-card__title-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .ai-card__header .card-heading {
+    margin-bottom: 0;
+  }
+
+  .ai-badge {
+    background: linear-gradient(180deg, #6C81FA 35%, #5D58FF 53%, #673AB7 90%);
+    color: #FFFFFF;
+    font-size: 0.65rem;
+    font-weight: var(--font-weight-bold);
+    padding: 0.15rem 0.45rem;
+    border-radius: var(--radius-pill);
+    letter-spacing: 0.04em;
+    flex-shrink: 0;
+  }
+
+  .diff-stats {
+    display: flex;
+    gap: 0.5rem;
+    flex-shrink: 0;
+  }
+
+  .diff-stat {
+    font-size: 0.75rem;
+    font-weight: var(--font-weight-bold);
+    padding: 0.2rem 0.5rem;
+    border-radius: var(--radius-pill);
+  }
+
+  .diff-stat--add {
+    background: #dcfce7;
+    color: #166534;
+  }
+
+  .diff-stat--del {
+    background: #fee2e2;
+    color: #991b1b;
+  }
+
+  .diff-stat--unch {
+    background: #F5F5F5;
+    color: #828282;
+  }
+
+  .ai-summary {
+    font-size: 0.9375em;
+    white-space: pre-wrap;
+    background: var(--color-bg-subtle);
+    padding: 1rem;
+    border-radius: var(--radius-button);
+    border: 1px solid var(--color-border-default);
+    margin-bottom: 1.25rem;
+    color: var(--color-text-primary);
+    line-height: 1.6;
+  }
+
+  .diff-details {
+    margin-bottom: 1rem;
+  }
+
+  .diff-details > summary {
+    list-style: none;
+  }
+
+  .diff-details > summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .diff-summary {
+    cursor: pointer;
+    font-weight: var(--font-weight-semibold);
+    color: var(--color-accent);
+    margin-bottom: 1rem;
+    font-size: 0.9375rem;
+  }
+
+  .diff-summary:hover {
+    text-decoration: underline;
+  }
+
+  .diff-viewer-wrap {
+    margin-top: 1rem;
+  }
+
+  .ai-card__footer {
+    margin-top: 1.25rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--color-border-default);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 1rem;
+    flex-wrap: wrap;
+  }
+
+  .diff-note {
+    font-size: 0.75rem;
+    color: #94a3b8;
+    font-style: italic;
+  }
+
+  /* ── Signing collapse ─────────────────────────────────────────────────── */
+  .signing-collapse {
+    padding: 0;
+    overflow: hidden;
+    border: 1px solid var(--color-border-mid);
+    background: var(--color-border-light);
+  }
+
+  .signing-collapse__trigger {
+    list-style: none;
+    cursor: pointer;
+    padding: 1rem 1.5rem;
+    font-weight: var(--font-weight-semibold);
+    font-size: 0.9375rem;
+    color: var(--color-text-primary);
+    display: flex;
+    align-items: center;
+    gap: 0.625rem;
+    user-select: none;
+  }
+
+  .signing-collapse__trigger::-webkit-details-marker {
+    display: none;
+  }
+
+  .signing-collapse__trigger::after {
+    content: '▸';
+    margin-left: auto;
+    color: var(--color-text-muted);
+    font-size: 0.75rem;
+  }
+
+  details[open] .signing-collapse__trigger::after {
+    content: '▾';
+  }
+
+  .signing-collapse__icon {
+    font-size: 1.125rem;
+  }
+
+  .signing-collapse__body {
+    padding: 0 1.5rem 1.5rem;
+    border-top: 1px solid var(--color-border-default);
+  }
+
+  .signing-collapse__body .card-subtext {
+    margin-top: 1rem;
+    margin-bottom: 1rem;
+  }
+
+  /* ── Signing wizard ────────────────────────────────────────────────────── */
+  .wizard-step { display: flex; flex-direction: column; gap: 0.875rem; }
+
+  .wizard-head {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 0.25rem;
+  }
+
+  .wizard-pip {
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    background: var(--color-border-default);
+    color: var(--color-text-muted);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.7rem;
+    font-weight: var(--font-weight-bold);
+    flex-shrink: 0;
+  }
+  .wizard-pip--active {
+    background: var(--color-accent);
+    color: var(--color-text-on-dark);
+  }
+  .wizard-pip--done {
+    background: var(--color-brand-mid);
+    color: var(--color-text-on-dark);
+  }
+
+  .wizard-step-label {
+    font-size: 0.875rem;
+    font-weight: var(--font-weight-semibold);
+    color: var(--color-text-primary);
+    margin-left: 0.25rem;
+  }
+
+  .wizard-blurb {
+    margin: 0;
+    line-height: 1.55;
+  }
+
+  /* ---- Signer cards (step 1) ---- */
+  .signer-cards {
+    display: flex;
+    flex-direction: column;
+    gap: 0.625rem;
+  }
+
+  .signer-card {
+    background: var(--color-bg-subtle);
+    border: 1px solid var(--color-border-default);
+    border-radius: var(--radius-input);
+    padding: 0.75rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .signer-card__row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.5rem;
+  }
+
+  .signer-card__row--meta {
+    grid-template-columns: 1fr auto;
+    align-items: center;
+  }
+
+  .signer-card__role {
+    border-radius: var(--radius-pill);
+    padding: 0.4rem 0.875rem;
+    background: var(--color-bg-white);
+    font-size: 0.85rem;
+  }
+
+  .signer-card__remove {
+    background: none;
+    border: none;
+    color: var(--color-text-muted);
+    font-size: 1.25rem;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0.2rem 0.55rem;
+    border-radius: var(--radius-input);
+    transition: background 0.15s ease, color 0.15s ease;
+  }
+  .signer-card__remove:hover {
+    background: #FEE2E2;
+    color: #991B1B;
+  }
+
+  .add-signer-btn {
+    background: none;
+    border: none;
+    color: var(--color-accent);
+    font-family: var(--font-family-base);
+    font-size: 0.85em;
+    cursor: pointer;
+    padding: 0;
+    align-self: flex-start;
+    text-align: left;
+  }
+  .add-signer-btn:hover { text-decoration: underline; }
+
+  /* ---- Step 2 summary + optional note ---- */
+  .wizard-summary {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    padding: 0.875rem 1rem;
+    background: var(--color-bg-subtle);
+    border-radius: var(--radius-input);
+    border: 1px solid var(--color-border-default);
+  }
+
+  .wizard-summary__label {
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-weight: var(--font-weight-semibold);
+    color: var(--color-text-muted);
+  }
+
+  .wizard-summary__list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.375rem;
+  }
+  .wizard-summary__list li {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.9rem;
+    color: var(--color-text-primary);
+  }
+  .wizard-summary__list li::before {
+    content: '●';
+    color: var(--color-accent);
+    font-size: 0.6rem;
+  }
+
+  .wizard-summary__role {
+    color: var(--color-text-muted);
+    font-size: 0.85rem;
+    margin-left: 0.25rem;
+  }
+
+  .wizard-note { padding: 0.25rem 0; }
+
+  .wizard-note__toggle {
+    cursor: pointer;
+    color: var(--color-accent);
+    font-size: 0.85rem;
+    font-weight: var(--font-weight-semibold);
+    list-style: none;
+    padding: 0.25rem 0;
+  }
+  .wizard-note__toggle::-webkit-details-marker { display: none; }
+  .wizard-note__toggle:hover { text-decoration: underline; }
+
+  .wizard-note__input {
+    margin-top: 0.5rem;
+    resize: vertical;
+  }
+
+  .wizard-actions {
+    display: flex;
+    justify-content: space-between;
+    gap: 0.5rem;
+    margin-top: 0.25rem;
+  }
+  .wizard-actions .btn-primary.btn-lg { width: auto; flex: 1; }
+
+  /* ── Signing roster ───────────────────────────────────────────────────── */
+  .signer-roster {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    margin-top: 0.75rem;
+  }
+
+  .signer-row-status {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 0.9em;
+    padding-bottom: 0.5rem;
+    border-bottom: 1px solid var(--color-bg-subtle);
+  }
+
+  .signer-row-status:last-child {
+    border-bottom: none;
+    padding-bottom: 0;
+  }
+
+  .signer-name {
+    font-weight: var(--font-weight-semibold);
+    color: var(--color-text-primary);
+  }
+
+  .signer-email {
+    color: var(--color-text-muted);
+    font-size: 0.85em;
+  }
+
+  .signer-badge--signed {
+    background: #dcfce7;
+    color: #166534;
+    display: inline-flex;
+    align-items: center;
+    padding: 0.2rem 0.5rem;
+    border-radius: var(--radius-pill);
+    font-size: 0.72rem;
+    font-weight: var(--font-weight-semibold);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .signer-badge--declined {
+    background: #fee2e2;
+    color: #991b1b;
+    display: inline-flex;
+    align-items: center;
+    padding: 0.2rem 0.5rem;
+    border-radius: var(--radius-pill);
+    font-size: 0.72rem;
+    font-weight: var(--font-weight-semibold);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .signer-badge--viewed {
+    background: var(--color-border-light);
+    color: var(--color-accent);
+    display: inline-flex;
+    align-items: center;
+    padding: 0.2rem 0.5rem;
+    border-radius: var(--radius-pill);
+    font-size: 0.72rem;
+    font-weight: var(--font-weight-semibold);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  /* ── Thread / Activity ────────────────────────────────────────────────── */
+  .col-right {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .thread-heading {
+    font-size: 0.875rem;
+    font-weight: var(--font-weight-semibold);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--color-text-muted);
+    margin: 0 0 0.75rem;
+  }
+
+  .thread-scroll {
+    overflow-y: auto;
+    max-height: calc(100vh - 220px);
+    display: flex;
+    flex-direction: column;
+    gap: 0.875rem;
+    padding-right: 2px; /* prevent clipping scrollbar shadow */
+  }
+
+  .thread-empty {
+    background: var(--color-bg-white);
+    border: 1px solid var(--color-border-default);
+    border-radius: var(--radius-card);
+    padding: 1.25rem;
+  }
+
+  /* Thread row — wrapper that places avatar next to bubble */
+  .thread-row {
+    display: flex;
+    gap: 0.5rem;
+    align-items: flex-start;
+    max-width: 100%;
+  }
+
+  .thread-row--outbound {
+    justify-content: flex-end;
+    margin-left: auto;
+  }
+
+  .thread-row--inbound {
+    justify-content: flex-start;
+    margin-right: auto;
+  }
+
+  .thread-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+    max-width: 85%;
+    min-width: 0;
+  }
+
+  .thread-row--outbound .thread-stack { align-items: flex-end; }
+  .thread-row--inbound  .thread-stack { align-items: flex-start; }
+
+  .thread-stamp {
+    font-size: 0.7rem;
+    color: var(--color-text-muted);
+    padding: 0 0.25rem;
+  }
+
+  /* Outbound bubble */
+  .thread-bubble--outbound {
+    background: var(--color-border-light);
+    border: 1px solid var(--color-border-mid);
+    border-radius: var(--radius-card);
+    padding: 0.75rem 0.95rem;
+  }
+
+  /* Inbound bubble */
+  .thread-bubble--inbound {
+    background: #FFFFFF;
+    border: 1px solid var(--color-border-default);
+    border-radius: var(--radius-card);
+    padding: 0.75rem 0.95rem;
+  }
+
+  .thread-bubble__subject {
+    font-size: 0.8125rem;
+    font-weight: var(--font-weight-semibold);
+    color: var(--color-text-primary);
+    margin-bottom: 0.375rem;
+  }
+
+  .thread-bubble__body {
+    font-size: 0.9em;
+    white-space: pre-wrap;
+    color: #334155;
+    line-height: 1.55;
+    word-break: break-word;
+  }
+
+  .thread-bubble__attachments {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin-top: 0.625rem;
+  }
+
+  /* Attachment chip */
+  .attachment-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    background: var(--color-bg-subtle);
+    border: 1px solid var(--color-border-default);
+    border-radius: var(--radius-pill);
+    padding: 0.25rem 0.625rem;
+    font-size: 0.75rem;
+    color: var(--color-accent);
+    text-decoration: none;
+    white-space: nowrap;
+    transition: background 0.15s ease;
+  }
+
+  .attachment-chip:hover {
+    background: var(--color-border-light);
+    text-decoration: none;
+  }
+
+  /* System event pill */
+  .thread-system {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 0.5rem 1rem;
+    background: var(--color-bg-subtle);
+    border-radius: var(--radius-pill);
+    max-width: 70%;
+    margin: 0 auto;
+  }
+
+  .thread-system__body {
+    font-size: 0.8rem;
+    color: var(--color-text-muted);
+    text-align: center;
+  }
+
+  .thread-system__date {
+    font-size: 0.7rem;
+    color: var(--color-text-muted);
+    opacity: 0.7;
+  }
+
+  /* ── Reply composer (chat-style, sticky bottom) ────────────────────────── */
+  .composer {
+    background: var(--color-bg-white);
+    border: 1px solid var(--color-border-default);
+    border-radius: var(--radius-card);
+    box-shadow: var(--shadow-raised);
+    margin-top: 1rem;
+    position: sticky;
+    bottom: 1.5rem;
+    flex-shrink: 0;
+  }
+
+  .composer__form { display: flex; flex-direction: column; }
+
+  .composer__text {
+    width: 100%;
+    box-sizing: border-box;
+    background: transparent;
+    border: none;
+    outline: none;
+    resize: none;
+    padding: 0.875rem 1rem;
+    font-family: var(--font-family-base);
+    font-size: 0.9375rem;
+    color: var(--color-text-primary);
+    line-height: 1.5;
+    min-height: 72px;
+  }
+
+  .composer__text::placeholder {
+    color: var(--color-text-muted);
+  }
+
+  .composer__foot {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.5rem 0.625rem 0.625rem;
+    border-top: 1px solid var(--color-border-default);
+    flex-wrap: wrap;
+  }
+
+  .composer__attach {
+    display: inline-flex;
+    align-items: center;
+    cursor: pointer;
+    user-select: none;
+  }
+
+  .composer__file-input {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0,0,0,0);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  .composer__attach-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.4rem 0.75rem;
+    border-radius: var(--radius-button);
+    background: transparent;
+    color: var(--color-text-muted);
+    font-size: 0.85rem;
+    transition: background 0.15s ease, color 0.15s ease;
+  }
+
+  .composer__attach:hover .composer__attach-label {
+    background: var(--color-bg-subtle);
+    color: var(--color-accent);
+  }
+
+  /* Attached-file chip rendering (set by JS via inner HTML) */
+  .composer__chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.3rem 0.65rem;
+    background: var(--color-border-light);
+    color: var(--color-accent);
+    border-radius: var(--radius-pill);
+    font-size: 0.8rem;
+    font-weight: var(--font-weight-semibold);
+    max-width: 240px;
+  }
+
+  .composer__chip-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .composer__chip-remove {
+    background: none;
+    border: none;
+    color: var(--color-accent);
+    font-size: 1rem;
+    cursor: pointer;
+    padding: 0;
+    line-height: 1;
+  }
+
+  .composer__send {
+    padding: 0.5rem 1rem;
+    font-size: 0.875rem;
+  }
+
+  /* ── Attachment links (legacy — used in AI card footer) ────────────────── */
+  .attachment {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    background: var(--color-bg-subtle);
+    border: 1px solid var(--color-border-default);
+    padding: 0.375rem 0.625rem;
+    border-radius: var(--radius-input);
+    font-size: 0.85em;
+    color: var(--color-accent);
+    text-decoration: none;
+  }
+
+  .attachment:hover {
+    text-decoration: underline;
+  }
+
+  /* ── Error banners ─────────────────────────────────────────────────────── */
+  .error-banner {
+    display: none;
+    background: #FEE2E2;
+    color: #991B1B;
+    padding: 0.75rem 1rem;
+    border-radius: 8px;
+    border-left: 4px solid #DC2626;
+    font-size: 0.9em;
+    margin-top: 0.75rem;
+    margin-bottom: 0.5rem;
+  }
+
+  /* ── HTML editor ─────────────────────────────────────────────────────── */
+  .doc-viewer__body--editor {
+    padding: 0;
+    overflow: hidden;
+  }
+
+  .doc-editor {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+  }
+
+  .doc-editor__toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 0.75rem;
+    padding: 0.625rem 1rem;
+    border-bottom: 1px solid var(--color-border-default);
+    background: var(--color-bg-subtle);
+    flex-shrink: 0;
+  }
+
+  .edit-save-status {
+    font-size: 0.8rem;
+    color: var(--color-text-muted);
+  }
+
+  .btn-sm {
+    padding: 0.375rem 0.875rem;
+    font-size: 0.85rem;
+  }
+
+  .doc-editor__content {
+    flex: 1;
+    overflow-y: auto;
+    padding: 2.5rem 2.75rem;
+    outline: none;
+    font-family: 'Inter', -apple-system, sans-serif;
+    font-size: 10.5pt;
+    line-height: 1.75;
+    color: #111827;
+  }
+
+  .doc-editor__content:focus {
+    box-shadow: inset 0 0 0 2px rgba(108, 129, 250, 0.25);
+  }
+
+  .doc-editor__content h2 {
+    font-size: 9pt;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: #374151;
+    margin: 28px 0 8px;
+    padding-bottom: 4px;
+    border-bottom: 1px solid #e5e7eb;
+  }
+
+  .doc-editor__content p {
+    margin: 0 0 10px;
+    text-align: justify;
+  }
+
+  .doc-editor__content .parties {
+    margin-bottom: 1.5rem;
+  }
+
+  .doc-editor__content .signature-section {
+    margin-top: 3rem;
+    display: flex;
+    gap: 3rem;
+  }
+
+  .doc-editor__content .signature-block {
+    flex: 1;
+  }
+
+  .doc-editor__content .signature-line {
+    border-top: 1px solid #374151;
+    padding-top: 8px;
+    margin-top: 3rem;
+  }
+
+  .doc-editor__content .signature-label {
+    font-size: 8.5pt;
+    color: #6b7280;
+    margin: 0;
+  }
+</style>
+
+<script define:vars={{ apiUrl, contractId: id, userInitial, v1HtmlContent, showEditTab }}>
+  // ── Document viewer ────────────────────────────────────────────────────────
+  ;(function initDocViewer() {
+    const tabPdf      = document.getElementById('docTabPdf')
+    const tabEdit     = document.getElementById('docTabEdit')
+    const tabChanges  = document.getElementById('docTabChanges')
+    const bodyPdf     = document.getElementById('docBodyPdf')
+    const bodyEdit    = document.getElementById('docBodyEdit')
+    const bodyChanges = document.getElementById('docBodyChanges')
+    const frame       = document.getElementById('docPdfFrame')
+    const loading     = document.getElementById('docPdfLoading')
+    const errEl       = document.getElementById('docPdfError')
+
+    const allTabs   = [tabPdf, tabEdit, tabChanges].filter(Boolean)
+    const allBodies = [bodyPdf, bodyEdit, bodyChanges].filter(Boolean)
+
+    function activateTab(activeTab, activeBody) {
+      allTabs.forEach(t => { t.classList.remove('doc-viewer__tab--active'); t.setAttribute('aria-selected', 'false') })
+      allBodies.forEach(b => { b.hidden = true })
+      if (activeTab)  { activeTab.classList.add('doc-viewer__tab--active'); activeTab.setAttribute('aria-selected', 'true') }
+      if (activeBody) activeBody.hidden = false
+    }
+
+    // Load PDF via signed URL
+    async function loadPdf() {
+      if (!frame) return
+      if (loading) loading.hidden = false
+      frame.hidden = true
+      if (errEl) errEl.hidden = true
+      try {
+        const res = await fetch(`${apiUrl}/api/contracts/${contractId}/download-url`, { credentials: 'include' })
+        if (!res.ok) throw new Error('failed')
+        const { url } = await res.json()
+        frame.src = url
+        frame.addEventListener('load', () => {
+          if (loading) loading.hidden = true
+          frame.hidden = false
+        }, { once: true })
+        // Fallback if iframe load event doesn't fire (some browsers block PDF iframes)
+        setTimeout(() => {
+          if (loading && !loading.hidden) {
+            loading.hidden = true
+            frame.hidden = false
+          }
+        }, 3000)
+      } catch {
+        if (loading) loading.hidden = true
+        if (errEl) errEl.hidden = false
+      }
+    }
+
+    loadPdf()
+
+    // Tab switching
+    tabPdf?.addEventListener('click', () => activateTab(tabPdf, bodyPdf))
+    tabChanges?.addEventListener('click', () => activateTab(tabChanges, bodyChanges))
+
+    // Edit tab — populate contenteditable on first open
+    let editorPopulated = false
+    tabEdit?.addEventListener('click', () => {
+      activateTab(tabEdit, bodyEdit)
+      if (!editorPopulated && v1HtmlContent) {
+        const el = document.getElementById('docEditorContent')
+        if (el) { el.innerHTML = v1HtmlContent; editorPopulated = true }
+      }
+    })
+
+    // Save button
+    const saveBtn    = document.getElementById('editSaveBtn')
+    const saveStatus = document.getElementById('editSaveStatus')
+    saveBtn?.addEventListener('click', async () => {
+      const editorEl = document.getElementById('docEditorContent')
+      if (!editorEl) return
+      const html = editorEl.innerHTML
+      saveBtn.disabled = true
+      if (saveStatus) saveStatus.textContent = 'Saving…'
+      try {
+        const res = await fetch(`${apiUrl}/api/contracts/${contractId}/html`, {
+          method: 'PATCH',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ htmlContent: html }),
+        })
+        if (!res.ok) throw new Error('save failed')
+        if (saveStatus) saveStatus.textContent = 'Saved ✓'
+        // Reload PDF so the Document tab reflects the edits
+        loadPdf()
+        setTimeout(() => { if (saveStatus) saveStatus.textContent = '' }, 3000)
+      } catch {
+        if (saveStatus) saveStatus.textContent = 'Save failed — try again'
+      } finally {
+        saveBtn.disabled = false
+      }
+    })
+  })()
+
+  // ── Stage mapping (mirrors SSR function) ──────────────────────────────────
+  function getStage(status) {
+    if (status === 'draft') return 1
+    if (['sent', 'ai_processing'].includes(status)) return 2
+    if (['received', 'replied', 'negotiating'].includes(status)) return 3
+    if (['out_for_signature', 'partially_signed'].includes(status)) return 4
+    if (['completed', 'signed'].includes(status)) return 5
+    if (status === 'declined') return 3
+    return 1
+  }
+
+  // ── Send-for-Review card ──────────────────────────────────────────────────
+  (function initSendCard() {
+    const card = document.getElementById('sendCard');
+    if (!card) return;
+    const expandBtn      = document.getElementById('sendExpandBtn');
+    const collapseBtn    = document.getElementById('sendCollapseBtn');
+    const cancelBtn      = document.getElementById('sendCancelBtn');
+    const recipientRows  = document.getElementById('recipientRows');
+    const addRecipientBtn = document.getElementById('addRecipientBtn');
+    const previewName    = document.getElementById('sendPreviewName');
+
+    const setExpanded = (open) => {
+      card.setAttribute('data-expanded', open ? 'true' : 'false');
+      if (open) {
+        const firstEmail = recipientRows?.querySelector('input[name="recipientEmail[]"]');
+        if (firstEmail) firstEmail.focus();
+      }
+    };
+    if (expandBtn)   expandBtn.addEventListener('click', () => setExpanded(true));
+    if (collapseBtn) collapseBtn.addEventListener('click', () => setExpanded(false));
+    if (cancelBtn)   cancelBtn.addEventListener('click', () => setExpanded(false));
+
+    function refreshRecipientRemovers() {
+      if (!recipientRows) return;
+      const cards = recipientRows.querySelectorAll('.signer-card');
+      cards.forEach((c, idx) => {
+        const btn = c.querySelector('.signer-card__remove');
+        if (btn) btn.hidden = !(cards.length > 1 && idx > 0);
+      });
+    }
+
+    function wireRecipientRemove(btn) {
+      if (!btn || btn.dataset.wired === '1') return;
+      btn.dataset.wired = '1';
+      btn.addEventListener('click', () => {
+        btn.closest('.signer-card')?.remove();
+        refreshRecipientRemovers();
+        updatePreviewName();
+        if (addRecipientBtn) addRecipientBtn.style.display = '';
+      });
+    }
+
+    function updatePreviewName() {
+      const firstNameInput = recipientRows?.querySelector('input[name="recipientName[]"]');
+      if (previewName) previewName.textContent = firstNameInput?.value.trim() || 'there';
+    }
+
+    function recipientEmailExists(email) {
+      if (!email) return false;
+      const norm = email.trim().toLowerCase();
+      return Array.from(recipientRows?.querySelectorAll('input[name="recipientEmail[]"]') ?? [])
+        .some(i => i.value.trim().toLowerCase() === norm);
+    }
+
+    function findBlankRecipientCard() {
+      return Array.from(recipientRows?.querySelectorAll('.signer-card') ?? []).find(c => {
+        const nameEl  = c.querySelector('input[name="recipientName[]"]');
+        const emailEl = c.querySelector('input[name="recipientEmail[]"]');
+        return !nameEl?.value.trim() && !emailEl?.value.trim();
+      });
+    }
+
+    // Live preview: first name input → "Hi <name>,"
+    recipientRows?.addEventListener('input', (e) => {
+      if (e.target.name === 'recipientName[]') updatePreviewName();
+    });
+
+    // Wire existing remove buttons
+    recipientRows?.querySelectorAll('.signer-card__remove').forEach(wireRecipientRemove);
+    refreshRecipientRemovers();
+
+    // Add recipient row
+    addRecipientBtn?.addEventListener('click', () => {
+      if (!recipientRows) return;
+      if (recipientRows.children.length >= 10) return;
+      const clone = recipientRows.children[0].cloneNode(true);
+      clone.querySelectorAll('input').forEach(i => i.value = '');
+      const removeBtn = clone.querySelector('.signer-card__remove');
+      if (removeBtn) { removeBtn.removeAttribute('data-wired'); wireRecipientRemove(removeBtn); }
+      recipientRows.appendChild(clone);
+      refreshRecipientRemovers();
+      if (recipientRows.children.length >= 10) addRecipientBtn.style.display = 'none';
+      clone.querySelector('input[name="recipientEmail[]"]')?.focus();
+    });
+
+    // Person chips fill first empty row (or add a new one)
+    document.querySelectorAll('[data-fill-recipient]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const name  = btn.dataset.personName  || '';
+        const email = btn.dataset.personEmail || '';
+        if (!email || recipientEmailExists(email)) return;
+        const blank = findBlankRecipientCard();
+        if (blank) {
+          blank.querySelector('input[name="recipientName[]"]').value  = name;
+          blank.querySelector('input[name="recipientEmail[]"]').value = email;
+        } else if (recipientRows && recipientRows.children.length < 10) {
+          addRecipientBtn?.click();
+          const last = recipientRows.lastElementChild;
+          if (last) {
+            last.querySelector('input[name="recipientName[]"]').value  = name;
+            last.querySelector('input[name="recipientEmail[]"]').value = email;
+          }
+        }
+        updatePreviewName();
+      });
+    });
+  })();
+
+  // ── Signing wizard: signer cards (Step 1) ────────────────────────────────
+  const addSignerBtn = document.getElementById('addSignerBtn');
+  const signerContainer = document.getElementById('signerRows');
+
+  function refreshSignerRemovers() {
+    if (!signerContainer) return;
+    const cards = signerContainer.querySelectorAll('.signer-card');
+    cards.forEach((card, idx) => {
+      const removeBtn = card.querySelector('.signer-card__remove');
+      if (!removeBtn) return;
+      // Show × only when there are 2+ signers AND this card isn't the first.
+      const show = cards.length > 1 && idx > 0;
+      removeBtn.hidden = !show;
+    });
+  }
+
+  function wireRemoveBtn(btn) {
+    if (!btn || btn.dataset.wired === '1') return;
+    btn.dataset.wired = '1';
+    btn.addEventListener('click', () => {
+      const card = btn.closest('.signer-card');
+      if (!card) return;
+      card.remove();
+      refreshSignerRemovers();
+      if (addSignerBtn) addSignerBtn.style.display = '';
+    });
+  }
+
+  function fillSignerCard(card, person) {
+    if (!card) return;
+    const nameInput = card.querySelector('input[name="signerName[]"]');
+    const emailInput = card.querySelector('input[name="signerEmail[]"]');
+    const roleInput = card.querySelector('select[name="signerRole[]"]');
+    if (nameInput) nameInput.value = person.name || '';
+    if (emailInput) emailInput.value = person.email || '';
+    if (roleInput) roleInput.value = person.role || 'other';
+  }
+
+  function signerEmailExists(email) {
+    if (!email) return false;
+    const normalized = email.trim().toLowerCase();
+    return Array.from(document.getElementsByName('signerEmail[]'))
+      .some((input) => input.value.trim().toLowerCase() === normalized);
+  }
+
+  function findBlankSignerCard() {
+    if (!signerContainer) return null;
+    return Array.from(signerContainer.querySelectorAll('.signer-card')).find((card) => {
+      const nameInput = card.querySelector('input[name="signerName[]"]');
+      const emailInput = card.querySelector('input[name="signerEmail[]"]');
+      return !nameInput?.value.trim() && !emailInput?.value.trim();
+    });
+  }
+
+  function addSignerFromPerson(person) {
+    if (!signerContainer || !person.email || signerEmailExists(person.email)) return;
+    const target = findBlankSignerCard();
+    if (target) {
+      fillSignerCard(target, person);
+      return;
+    }
+    if (signerContainer.children.length >= 4) return;
+    const clone = signerContainer.children[0].cloneNode(true);
+    const cloneRemove = clone.querySelector('.signer-card__remove');
+    if (cloneRemove) cloneRemove.removeAttribute('data-wired');
+    fillSignerCard(clone, person);
+    signerContainer.appendChild(clone);
+    if (cloneRemove) wireRemoveBtn(cloneRemove);
+    refreshSignerRemovers();
+    if (addSignerBtn && signerContainer.children.length >= 4) addSignerBtn.style.display = 'none';
+  }
+
+  if (signerContainer) {
+    signerContainer.querySelectorAll('.signer-card__remove').forEach(wireRemoveBtn);
+    refreshSignerRemovers();
+  }
+
+  if (addSignerBtn && signerContainer) {
+    addSignerBtn.addEventListener('click', () => {
+      if (signerContainer.children.length >= 4) return;
+      const clone = signerContainer.children[0].cloneNode(true);
+      clone.querySelectorAll('input').forEach(i => i.value = '');
+      clone.querySelectorAll('select').forEach(s => s.value = 'counterparty');
+      const cloneRemove = clone.querySelector('.signer-card__remove');
+      if (cloneRemove) cloneRemove.removeAttribute('data-wired');
+      signerContainer.appendChild(clone);
+      if (cloneRemove) wireRemoveBtn(cloneRemove);
+      refreshSignerRemovers();
+      if (signerContainer.children.length >= 4) addSignerBtn.style.display = 'none';
+    });
+  }
+
+  document.querySelectorAll('[data-add-signer]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      addSignerFromPerson({
+        name: btn.dataset.personName || '',
+        email: btn.dataset.personEmail || '',
+        role: btn.dataset.personRole || 'other',
+      });
+    });
+  });
+
+  // ── Signing wizard: step navigation ──────────────────────────────────────
+  (function initSigningWizard() {
+    const step1 = document.getElementById('signing-step-1');
+    const step2 = document.getElementById('signing-step-2');
+    const nextBtn = document.getElementById('signNextBtn');
+    const backBtn = document.getElementById('signBackBtn');
+    const summaryList = document.getElementById('signersSummary');
+    const step1Error = document.getElementById('signStep1Error');
+    if (!step1 || !step2 || !nextBtn || !backBtn || !summaryList) return;
+
+    const setErr = (msg) => {
+      if (!step1Error) return;
+      step1Error.textContent = msg ?? '';
+      step1Error.style.display = msg ? 'block' : 'none';
+    };
+
+    nextBtn.addEventListener('click', () => {
+      const names  = Array.from(document.getElementsByName('signerName[]')).map(i => i.value.trim());
+      const emails = Array.from(document.getElementsByName('signerEmail[]')).map(i => i.value.trim());
+      const roles  = Array.from(document.getElementsByName('signerRole[]')).map(i => i.value);
+
+      for (let i = 0; i < names.length; i++) {
+        if (!names[i] || !emails[i]) {
+          setErr('Please fill in every signer’s name and email.');
+          return;
+        }
+        // Light email check
+        if (!/.+@.+\..+/.test(emails[i])) {
+          setErr(`"${emails[i]}" doesn’t look like a valid email.`);
+          return;
+        }
+      }
+      setErr('');
+
+      // Build summary
+      summaryList.innerHTML = '';
+      names.forEach((n, i) => {
+        const li = document.createElement('li');
+        const role = roles[i] || 'counterparty';
+        const roleLabel = role.charAt(0).toUpperCase() + role.slice(1);
+        const safeName = n.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+        const safeEmail = emails[i].replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+        li.innerHTML = `<span><strong>${safeName}</strong> (${safeEmail})</span><span class="wizard-summary__role">— ${roleLabel}</span>`;
+        summaryList.appendChild(li);
+      });
+
+      step1.hidden = true;
+      step2.hidden = false;
+    });
+
+    backBtn.addEventListener('click', () => {
+      step2.hidden = true;
+      step1.hidden = false;
+    });
+  })();
+
+  // ── Send for Signature ─────────────────────────────────────────────────────
+  const signForm = document.getElementById('signForm');
+  if (signForm) {
+    signForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const btn = document.getElementById('signSubmitBtn');
+      btn.disabled = true;
+      btn.textContent = 'Preparing...';
+      const signError = document.getElementById('signError');
+      if (signError) { signError.textContent = ''; signError.style.display = 'none'; }
+
+      const names  = Array.from(document.getElementsByName('signerName[]')).map(i => i.value);
+      const emails = Array.from(document.getElementsByName('signerEmail[]')).map(i => i.value);
+      const roles  = Array.from(document.getElementsByName('signerRole[]')).map(i => i.value);
+      const message = document.getElementsByName('signMessage')[0]?.value ?? '';
+
+      const signers = names.map((name, i) => ({
+        name,
+        email: emails[i],
+        role: roles[i],
+        order: i + 1,
+      }));
+
+      const res = await fetch(`${apiUrl}/api/contracts/${contractId}/send-for-signature`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ signers, message }),
+        credentials: 'include',
+      });
+
+      if (res.ok) {
+        // Backend returns a BoldSign sendUrl. The sender mounts it in an iframe,
+        // drags signature fields onto the PDF, and clicks Send. The actual
+        // signature request goes out when BoldSign fires the Sent webhook.
+        const { sendUrl } = await res.json();
+        if (!sendUrl) {
+          const signError = document.getElementById('signError');
+          if (signError) { signError.textContent = 'Server did not return a prepare URL.'; signError.style.display = 'block'; }
+          btn.disabled = false;
+          btn.textContent = 'Prepare Signature';
+          return;
+        }
+        // Open the prepare iframe in a full-screen modal. Dispatches a custom
+        // event back to the page-level script (defined in the bottom-of-file
+        // script block) so we keep iframe wiring in one place.
+        window.dispatchEvent(new CustomEvent('genie:open-prepare-iframe', { detail: { sendUrl } }));
+        btn.disabled = false;
+        btn.textContent = 'Prepare Signature';
+      } else {
+        const err = await res.json();
+        const signError = document.getElementById('signError');
+        if (signError) { signError.textContent = `Failed to send for signature: ${err.error || 'Unknown error'}`; signError.style.display = 'block'; }
+        btn.disabled = false;
+        btn.textContent = 'Prepare Signature';
+      }
+    });
+  }
+
+  // ── Sign Now is wired up in a separate (Vite-bundled) <script> block below
+  //    because it needs to `import` the hellosign-embedded SDK, which is not
+  //    allowed inside this inline `define:vars` script.
+
+  // ── Download Signed PDF ────────────────────────────────────────────────────
+  const downloadSignedBtn = document.getElementById('downloadSignedBtn');
+  if (downloadSignedBtn) {
+    downloadSignedBtn.addEventListener('click', async () => {
+      const downloadError = document.getElementById('downloadError');
+      if (downloadError) { downloadError.textContent = ''; downloadError.style.display = 'none'; }
+      const res = await fetch(`${apiUrl}/api/contracts/${contractId}/signed-document`, {
+        credentials: 'include',
+      });
+      if (res.ok) {
+        const { url } = await res.json();
+        window.open(url, '_blank');
+      } else {
+        if (downloadError) { downloadError.textContent = 'Failed to get signed document'; downloadError.style.display = 'block'; }
+      }
+    });
+  }
+
+  // ── Send for Review ────────────────────────────────────────────────────────
+  const sendForm = document.getElementById('sendForm');
+  if (sendForm) {
+    sendForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const btn = document.getElementById('sendBtn');
+      btn.disabled = true;
+      btn.textContent = 'Sending...';
+      const sendError = document.getElementById('sendError');
+      if (sendError) { sendError.textContent = ''; sendError.style.display = 'none'; }
+
+      const names  = Array.from(sendForm.querySelectorAll('input[name="recipientName[]"]')).map(i => i.value.trim());
+      const emails = Array.from(sendForm.querySelectorAll('input[name="recipientEmail[]"]')).map(i => i.value.trim());
+
+      // Validate
+      for (let i = 0; i < emails.length; i++) {
+        if (!emails[i]) {
+          if (sendError) { sendError.textContent = 'Please enter an email for every recipient.'; sendError.style.display = 'block'; }
+          btn.disabled = false; btn.textContent = 'Send'; return;
+        }
+        if (!/.+@.+\..+/.test(emails[i])) {
+          if (sendError) { sendError.textContent = `"${emails[i]}" doesn't look like a valid email.`; sendError.style.display = 'block'; }
+          btn.disabled = false; btn.textContent = 'Send'; return;
+        }
+      }
+
+      const recipients = emails.map((email, i) => ({ name: names[i] || email, email }));
+
+      const res = await fetch(`${apiUrl}/api/contracts/${contractId}/send`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ recipients }),
+        credentials: 'include',
+      });
+
+      if (res.ok) {
+        window.location.reload();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        if (sendError) { sendError.textContent = err.error || 'Failed to send'; sendError.style.display = 'block'; }
+        btn.disabled = false;
+        btn.textContent = 'Send';
+      }
+    });
+  }
+
+  // ── Reply composer ─────────────────────────────────────────────────────────
+  const replyForm = document.getElementById('replyForm');
+  if (replyForm) {
+    const textarea     = document.getElementById('replyText');
+    const fileInput    = document.getElementById('replyFile');
+    const attachLabel  = document.getElementById('replyAttachLabel');
+    const sendBtn      = document.getElementById('replyBtn');
+    const replyError   = document.getElementById('replyError');
+    const updateSendState = () => {
+      const hasText = textarea.value.trim().length > 0;
+      sendBtn.disabled = !hasText;
+    };
+
+    // Auto-grow textarea
+    const autoGrow = () => {
+      textarea.style.height = 'auto';
+      const next = Math.min(textarea.scrollHeight, 200);
+      textarea.style.height = `${next}px`;
+    };
+
+    textarea.addEventListener('input', () => {
+      autoGrow();
+      updateSendState();
+    });
+
+    const resetAttachLabel = () => {
+      attachLabel.classList.remove('composer__chip');
+      attachLabel.innerHTML = '📎 Attach revised PDF';
+    };
+
+    fileInput.addEventListener('change', () => {
+      const file = fileInput.files?.[0];
+      if (!file) {
+        resetAttachLabel();
+        return;
+      }
+      attachLabel.classList.add('composer__chip');
+      attachLabel.innerHTML = `
+        <span class="composer__chip-name">📎 ${String(file.name).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}</span>
+        <button type="button" id="replyChipRemove" class="composer__chip-remove" aria-label="Remove attachment">×</button>
+      `;
+      const removeBtn = document.getElementById('replyChipRemove');
+      if (removeBtn) {
+        removeBtn.addEventListener('click', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          fileInput.value = '';
+          resetAttachLabel();
+        });
+      }
+    });
+
+    replyForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const labelSnapshot = sendBtn.textContent;
+      sendBtn.disabled = true;
+      sendBtn.textContent = 'Sending…';
+      if (replyError) { replyError.textContent = ''; replyError.style.display = 'none'; }
+
+      const formData = new FormData(replyForm);
+      const messageText = formData.get('message') ?? '';
+
+      const res = await fetch(`${apiUrl}/api/contracts/${contractId}/reply`, {
+        method: 'POST',
+        body: formData,
+        credentials: 'include',
+      });
+
+      if (res.ok) {
+        const threadScroll = document.querySelector('.thread-scroll');
+        if (threadScroll) {
+          const d = new Date();
+          const stamp = `${d.toLocaleString('en-US', { month: 'short', day: 'numeric' })} · ${d.toLocaleString('en-US', { hour: 'numeric', minute: '2-digit' })}`;
+          const safeText = String(messageText).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+          const row = document.createElement('div');
+          row.className = 'thread-row thread-row--outbound';
+          row.innerHTML = `
+            <div class="thread-stack">
+              <div class="thread-bubble thread-bubble--outbound">
+                <div class="thread-bubble__body">${safeText || 'Sent with attachment.'}</div>
+              </div>
+              <div class="thread-stamp">You · ${stamp}</div>
+            </div>
+            <span class="avatar avatar--outbound" aria-hidden="true">${userInitial}</span>
+          `;
+          const emptyEl = threadScroll.querySelector('.thread-empty');
+          if (emptyEl) emptyEl.remove();
+          threadScroll.appendChild(row);
+          threadScroll.scrollTop = threadScroll.scrollHeight;
+        }
+        replyForm.reset();
+        resetAttachLabel();
+        textarea.style.height = 'auto';
+        updateSendState();
+        sendBtn.textContent = labelSnapshot ?? 'Send Reply →';
+      } else {
+        const err = await res.json().catch(() => ({}));
+        if (replyError) { replyError.textContent = `Failed to reply: ${err.error || 'Unknown error'}`; replyError.style.display = 'block'; }
+        sendBtn.textContent = labelSnapshot ?? 'Send Reply →';
+        updateSendState();
+      }
+    });
+
+    // Initial state
+    updateSendState();
+  }
+
+  // ── Attachment downloads ───────────────────────────────────────────────────
+  // Both .attachment (legacy AI footer) and .attachment-chip (thread bubbles)
+  document.querySelectorAll('.attachment, .attachment-chip').forEach(el => {
+    el.addEventListener('click', async (e) => {
+      e.preventDefault();
+      const attachmentError = document.getElementById('attachmentError');
+      if (attachmentError) { attachmentError.textContent = ''; attachmentError.style.display = 'none'; }
+      const key = el.getAttribute('data-key');
+      const url = key
+        ? `${apiUrl}/api/contracts/${contractId}/attachment?key=${encodeURIComponent(key)}`
+        : `${apiUrl}/api/contracts/${contractId}/download-url`;
+      const res = await fetch(url, { credentials: 'include' });
+      if (res.ok) {
+        const { url: signedUrl } = await res.json();
+        window.open(signedUrl, '_blank');
+      } else {
+        if (attachmentError) { attachmentError.textContent = 'Failed to get download link'; attachmentError.style.display = 'block'; }
+      }
+    });
+  });
+
+  // ── SSE — Smart Reload ─────────────────────────────────────────────────────
+  function initSSE() {
+    const mainEl = document.querySelector('[data-current-status]');
+    const currentStatus = mainEl ? mainEl.getAttribute('data-current-status') : null;
+
+    const es = new EventSource(`${apiUrl}/api/events`, { withCredentials: true });
+
+    es.addEventListener('status', (e) => {
+      const data = JSON.parse(e.data);
+      if (data.contractId !== contractId) return;
+      if (!['draft', 'sent', 'ai_processing', 'received', 'replied', 'negotiating', 'out_for_signature', 'partially_signed', 'completed', 'signed', 'declined'].includes(data.status)) {
+        return;
+      }
+
+      const currentStage = getStage(currentStatus ?? '');
+      const newStage     = getStage(data.status);
+
+      if (newStage !== currentStage) {
+        // Stage changed — action area content changes; full reload needed
+        window.location.reload();
+        return;
+      }
+
+      // If in signing stage (4), always reload to refresh signer status badges
+      if (newStage === 4) {
+        window.location.reload();
+        return;
+      }
+
+      // Same stage, not signing — no DOM change needed; just keep our local
+      // "currentStatus" attribute in sync so the next event's stage diff is
+      // computed against the latest status.
+      if (mainEl) mainEl.setAttribute('data-current-status', data.status);
+    });
+
+    es.onerror = (err) => {
+      console.error('SSE error', err);
+    };
+  }
+
+  initSSE();
+</script>
+
+<script>
+  // BoldSign embedded signing: open the sign URL in a full-screen iframe overlay
+  // and listen for postMessage events from app.boldsign.com to detect completion.
+
+  const apiUrl = import.meta.env.PUBLIC_API_URL || 'http://localhost:8080';
+  const contractId = window.location.pathname.split('/').filter(Boolean).pop();
+
+  const signNowBtn = document.getElementById('signNowBtn') as HTMLButtonElement | null;
+  const signNowError = document.getElementById('signNowError') as HTMLElement | null;
+
+  function showError(msg: string) {
+    if (signNowError) {
+      signNowError.textContent = msg;
+      signNowError.style.display = 'block';
+    }
+  }
+
+  function resetButton() {
+    if (signNowBtn) {
+      signNowBtn.disabled = false;
+      signNowBtn.textContent = 'Sign Now';
+    }
+  }
+
+  function buildOverlay(signUrl: string): { overlay: HTMLElement; close: () => void } {
+    const overlay = document.createElement('div');
+    overlay.style.cssText = [
+      'position:fixed',
+      'inset:0',
+      'background:rgba(0,0,0,0.75)',
+      'z-index:9999',
+      'display:flex',
+      'align-items:center',
+      'justify-content:center',
+      'padding:24px',
+    ].join(';');
+
+    const frameWrap = document.createElement('div');
+    frameWrap.style.cssText = [
+      'position:relative',
+      'width:100%',
+      'height:100%',
+      'max-width:1200px',
+      'background:#fff',
+      'border-radius:12px',
+      'overflow:hidden',
+      'box-shadow:0 24px 64px rgba(0,0,0,0.4)',
+    ].join(';');
+
+    const closeBtn = document.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.textContent = '×';
+    closeBtn.setAttribute('aria-label', 'Close signing window');
+    closeBtn.style.cssText = [
+      'position:absolute',
+      'top:8px',
+      'right:12px',
+      'z-index:1',
+      'background:rgba(255,255,255,0.95)',
+      'border:1px solid #ddd',
+      'border-radius:50%',
+      'width:32px',
+      'height:32px',
+      'font-size:20px',
+      'line-height:1',
+      'cursor:pointer',
+    ].join(';');
+
+    const iframe = document.createElement('iframe');
+    iframe.src = signUrl;
+    iframe.allow = 'camera; microphone; geolocation';
+    iframe.style.cssText = 'width:100%;height:100%;border:0;display:block;';
+
+    frameWrap.appendChild(closeBtn);
+    frameWrap.appendChild(iframe);
+    overlay.appendChild(frameWrap);
+    document.body.appendChild(overlay);
+
+    const close = () => {
+      if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+    };
+    closeBtn.addEventListener('click', close);
+
+    return { overlay, close };
+  }
+
+  // BoldSign signLinks are served from app.boldsign.com (EU: app-eu.boldsign.com).
+  // Accept either origin.
+  const BOLDSIGN_ORIGINS = new Set([
+    'https://app.boldsign.com',
+    'https://app-eu.boldsign.com',
+  ]);
+
+  if (signNowBtn) {
+    signNowBtn.addEventListener('click', async () => {
+      signNowBtn.disabled = true;
+      signNowBtn.textContent = 'Loading signing page…';
+      if (signNowError) { signNowError.textContent = ''; signNowError.style.display = 'none'; }
+
+      let payload: { url: string };
+      try {
+        const res = await fetch(`${apiUrl}/api/contracts/${contractId}/sign-url`, {
+          credentials: 'include',
+        });
+        if (!res.ok) throw new Error(`status ${res.status}`);
+        payload = await res.json();
+      } catch (err) {
+        console.error('[SignNow] failed to fetch sign URL', err);
+        showError('Failed to load signing page. Please try again.');
+        resetButton();
+        return;
+      }
+
+      const { close } = buildOverlay(payload.url);
+
+      const onMessage = (evt: MessageEvent) => {
+        if (!BOLDSIGN_ORIGINS.has(evt.origin)) return;
+        // BoldSign posts { type, ... } messages. The exact payload type names
+        // observed in the wild: onSignComplete, onSignCancel, onSignDecline,
+        // onSignError, onReassign, onSendComplete. Some installs also emit a
+        // bare string. Be lenient.
+        const data: any = evt.data;
+        const type = typeof data === 'string' ? data : data?.type ?? data?.eventType;
+        if (!type) return;
+        const t = String(type).toLowerCase();
+        if (t.includes('signcomplete') || t === 'onsigncomplete') {
+          window.removeEventListener('message', onMessage);
+          close();
+          // Webhook will mark the signer as signed; reload to reflect new state.
+          window.location.reload();
+        } else if (t.includes('cancel') || t.includes('decline')) {
+          window.removeEventListener('message', onMessage);
+          close();
+          resetButton();
+        } else if (t.includes('error')) {
+          console.error('[SignNow] BoldSign error', data);
+          window.removeEventListener('message', onMessage);
+          close();
+          showError('Signing failed. Please try again.');
+          resetButton();
+        }
+      };
+      window.addEventListener('message', onMessage);
+    });
+  }
+
+  // ── Sender prepare-iframe (Send for Signature → drag fields → click Send) ──
+  // Triggered by a custom event dispatched from the inline `signForm` submit
+  // handler. The sender places signature/date fields on the PDF inside the
+  // iframe, then clicks Send in the BoldSign toolbar. BoldSign creates the
+  // signature request and fires the Sent webhook to our backend; we reload
+  // the page to reflect the new 'out_for_signature' state.
+  window.addEventListener('genie:open-prepare-iframe', (evt: Event) => {
+    const detail = (evt as CustomEvent<{ sendUrl: string }>).detail;
+    if (!detail?.sendUrl) return;
+
+    const { close } = buildOverlay(detail.sendUrl);
+
+    const onPrepareMessage = (evt: MessageEvent) => {
+      if (!BOLDSIGN_ORIGINS.has(evt.origin)) return;
+      const data: any = evt.data;
+      const type = typeof data === 'string' ? data : data?.type ?? data?.eventType;
+      if (!type) return;
+      const t = String(type).toLowerCase();
+      if (
+        t.includes('documentsent') ||
+        t === 'ondocumentsent' ||
+        t.includes('sendcomplete') ||
+        t === 'onsendcomplete' ||
+        t.includes('draftsuccess')
+      ) {
+        window.removeEventListener('message', onPrepareMessage);
+        close();
+        // Webhook will create signer rows + flip contract status; reload.
+        window.location.reload();
+      } else if (t.includes('cancel') || t.includes('close')) {
+        window.removeEventListener('message', onPrepareMessage);
+        close();
+      } else if (t.includes('error') || t.includes('failed')) {
+        console.error('[Prepare] BoldSign error', data);
+        window.removeEventListener('message', onPrepareMessage);
+        close();
+        alert('Failed to prepare the document. Please try again.');
+      }
+    };
+    window.addEventListener('message', onPrepareMessage);
+  });
+</script>

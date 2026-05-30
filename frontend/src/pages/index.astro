@@ -1,0 +1,144 @@
+---
+import AppLayout from '../layouts/AppLayout.astro'
+
+const apiUrl = import.meta.env.PUBLIC_API_URL || 'http://localhost:8080'
+
+// Server-side: if the user already has a valid session, send them straight to the dashboard.
+// This prevents a logged-in user from ever seeing the landing page again.
+try {
+  const sessionRes = await fetch(`${apiUrl}/api/auth/get-session`, {
+    headers: { cookie: Astro.request.headers.get('cookie') ?? '' },
+  })
+  if (sessionRes.ok) {
+    const data = await sessionRes.json()
+    if (data?.user) return Astro.redirect('/dashboard')
+  }
+} catch {
+  // Backend unreachable — show the landing page so the user isn't stranded
+}
+
+// Detect errors forwarded from the OAuth callback (e.g. user cancelled Google sign-in)
+const rawError = Astro.url.searchParams.get('error')
+let errorMessage: string | null = null
+if (rawError === 'access_denied') {
+  errorMessage = 'Sign-in was cancelled. Click the button below to try again.'
+} else if (rawError === 'service_unavailable') {
+  errorMessage = 'The service is temporarily unavailable. Please try again in a moment.'
+} else if (rawError) {
+  errorMessage = 'Something went wrong during sign-in. Please try again.'
+}
+---
+<AppLayout title="Genie AI — Legal Contract Workflow" user={null} apiUrl={apiUrl}>
+  <div class="landing-center">
+  <main class="landing-main">
+    <h1 class="landing-title">Genie AI</h1>
+    <p class="landing-subtitle">Send, track, and analyse legal contracts with precision.</p>
+
+    {errorMessage && (
+      <div class="error-banner" role="alert">{errorMessage}</div>
+    )}
+
+    <button class="btn-primary landing-btn" id="google-signin">
+      Continue with Google
+    </button>
+
+    <div class="signin-error" id="signin-error" role="alert"></div>
+  </main>
+  </div>
+</AppLayout>
+
+<style>
+  .landing-center {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+  }
+
+  .landing-main {
+    text-align: center;
+    max-width: 560px;
+    padding: 2rem;
+  }
+
+  .landing-title {
+    font-size: 3rem;
+    font-weight: var(--font-weight-bold);
+    color: var(--color-brand-deep);
+    margin-bottom: 1rem;
+    letter-spacing: -0.025em;
+  }
+
+  .landing-subtitle {
+    font-size: 1.125rem;
+    color: var(--color-text-muted);
+    margin-bottom: 2rem;
+  }
+
+  .landing-btn {
+    font-size: 1rem;
+    padding: 0.75rem 1.75rem;
+  }
+
+  .error-banner {
+    background: #fef2f2;
+    border: 1px solid #fecaca;
+    color: #b91c1c;
+    padding: 0.75rem 1rem;
+    border-radius: var(--radius-button);
+    margin-bottom: 1.5rem;
+    font-size: 0.95rem;
+  }
+
+  .signin-error {
+    display: none;
+    background: #fef2f2;
+    border: 1px solid #fecaca;
+    color: #b91c1c;
+    padding: 0.75rem 1rem;
+    border-radius: var(--radius-button);
+    margin-top: 1rem;
+    font-size: 0.9rem;
+  }
+</style>
+
+<script define:vars={{ apiUrl }}>
+  const btn = document.getElementById('google-signin');
+  const errorDiv = document.getElementById('signin-error');
+
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    btn.textContent = 'Redirecting to Google…';
+    errorDiv.style.display = 'none';
+
+    try {
+      const res = await fetch(`${apiUrl}/api/auth/sign-in/social`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          provider: 'google',
+          callbackURL: `${window.location.origin}/dashboard`,
+          errorCallbackURL: `${window.location.origin}/`,
+        }),
+        credentials: 'include',
+      });
+
+      if (!res.ok) {
+        throw new Error(`Server responded with ${res.status}`);
+      }
+
+      const data = await res.json();
+
+      if (data.url) {
+        window.location.href = data.url;
+      } else {
+        throw new Error('No redirect URL returned from server.');
+      }
+    } catch (err) {
+      errorDiv.textContent = 'Could not connect to the sign-in service. Please check your connection and try again.';
+      errorDiv.style.display = 'block';
+      btn.disabled = false;
+      btn.textContent = 'Continue with Google';
+    }
+  });
+</script>

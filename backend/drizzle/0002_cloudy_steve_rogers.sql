@@ -1,0 +1,2 @@
+DROP INDEX "ct_postmark_msg_id_uidx";--> statement-breakpoint
+CREATE UNIQUE INDEX "ct_postmark_msg_id_uidx" ON "contract_threads" USING btree ("postmark_message_id") WHERE direction = 'outbound' AND postmark_message_id IS NOT NULL;

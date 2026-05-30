@@ -1,0 +1,147 @@
+---
+import AppLayout from '../../layouts/AppLayout.astro'
+
+// Public page — no authentication required.
+// Non-Genie signers land here from the email invitation link.
+// We fetch a fresh BoldSign embedded sign URL on every visit (the token
+// never expires; only the generated sign URL has a 60-minute window) and
+// mount it in a full-viewport iframe. On error we show a minimal message.
+const { token } = Astro.params
+const apiUrl = import.meta.env.PUBLIC_API_URL || 'http://localhost:8080'
+
+let signUrl: string | null = null
+let errorMessage: string | null = null
+let errorStatus: number | null = null
+
+try {
+  const res = await fetch(`${apiUrl}/api/public/sign/${token}`)
+  if (res.ok) {
+    const body = await res.json()
+    signUrl = body.url
+  } else {
+    errorStatus = res.status
+    const body = await res.json().catch(() => ({}))
+    errorMessage = body.error ?? 'Something went wrong.'
+  }
+} catch {
+  errorMessage = 'Could not reach the server. Please try again later.'
+}
+
+---
+<AppLayout title="Signing link — Genie AI" user={null}>
+  <div class="sign-page">
+    {signUrl ? (
+      <iframe
+        src={signUrl}
+        class="sign-frame"
+        allow="camera; microphone; geolocation"
+        title="Signing page"
+      ></iframe>
+    ) : (
+    <div class="card sign-card">
+      {errorStatus === 409 ? (
+        <>
+          <div class="sign-icon">✓</div>
+          <h1 class="sign-heading">Already complete</h1>
+          <p class="sign-body">{errorMessage}</p>
+          <a href="/dashboard" class="sign-back-link">← Back to Dashboard</a>
+        </>
+      ) : (
+        <>
+          <div class="sign-icon">⚠️</div>
+          <h1 class="sign-heading">Signing link not found</h1>
+          <p class="sign-body">{errorMessage ?? 'This link may have already been used or does not exist.'}</p>
+          <p class="sign-footer">If you believe this is an error, contact the person who sent you the contract.</p>
+          <a href="/dashboard" class="sign-back-link">← Back to Dashboard</a>
+        </>
+      )}
+    </div>
+    )}
+  </div>
+</AppLayout>
+
+<style>
+  .sign-page {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    padding: 2rem;
+  }
+
+  .sign-frame {
+    position: fixed;
+    inset: 0;
+    width: 100vw;
+    height: 100vh;
+    border: 0;
+    background: #fff;
+    z-index: 1000;
+  }
+
+  .sign-card {
+    padding: 2rem 2.5rem;
+    max-width: 480px;
+    width: 100%;
+    text-align: center;
+  }
+
+  .sign-icon {
+    font-size: 2.5rem;
+    margin-bottom: 1rem;
+  }
+
+  .sign-heading {
+    font-size: 1.25rem;
+    font-weight: var(--font-weight-bold);
+    color: var(--color-text-primary);
+    margin-bottom: 0.75rem;
+  }
+
+  .sign-body {
+    color: var(--color-text-muted);
+    font-size: 0.95rem;
+    line-height: 1.6;
+    margin-bottom: 0;
+  }
+
+  .sign-footer {
+    margin-top: 1rem;
+    font-size: 0.85rem;
+    color: var(--color-text-muted);
+  }
+
+  .sign-back-link {
+    display: inline-block;
+    margin-top: 1.25rem;
+    font-size: 0.875rem;
+    color: var(--color-text-muted);
+    text-decoration: none;
+  }
+
+  .sign-back-link:hover {
+    color: var(--color-accent);
+    text-decoration: underline;
+  }
+
+  /* ── Spinner ─────────────────────────────────────────────────────────────── */
+  @keyframes sign-spin {
+    from { transform: rotate(0deg); }
+    to   { transform: rotate(360deg); }
+  }
+
+  .sign-spinner-wrap {
+    display: flex;
+    justify-content: center;
+    margin-bottom: 1.25rem;
+  }
+
+  .sign-spinner {
+    width: 36px;
+    height: 36px;
+    border: 3px solid var(--color-border-default);
+    border-top-color: var(--color-accent);
+    border-radius: 50%;
+    animation: sign-spin 1s linear infinite;
+  }
+</style>

@@ -1,0 +1,1 @@
+ALTER TABLE "contract_signers" DROP COLUMN "dropbox_signature_id";

@@ -1,0 +1,462 @@
+---
+import AppLayout from '../layouts/AppLayout.astro'
+
+const apiUrl = import.meta.env.PUBLIC_API_URL || 'http://localhost:8080'
+const cookieHeader = Astro.request.headers.get('cookie') ?? ''
+
+let user: any = null
+let projectsData: any[] = []
+let orphanContracts: any[] = []
+let awaitingSig: any[] = []
+
+try {
+  const sessionRes = await fetch(`${apiUrl}/api/auth/get-session`, { headers: { cookie: cookieHeader } })
+  if (!sessionRes.ok) return Astro.redirect('/')
+  const session = await sessionRes.json()
+  if (!session?.user) return Astro.redirect('/')
+  user = session.user
+} catch { return Astro.redirect('/?error=service_unavailable') }
+
+try {
+  const [pR, cR] = await Promise.all([
+    fetch(`${apiUrl}/api/projects`, { headers: { cookie: cookieHeader } }),
+    fetch(`${apiUrl}/api/contracts`, { headers: { cookie: cookieHeader } }),
+  ])
+  if (pR.ok) projectsData = (await pR.json()).projects ?? []
+  if (cR.ok) {
+    const all: any[] = (await cR.json()).contracts ?? []
+    const inProject = new Set(projectsData.flatMap((p: any) => (p.contracts ?? []).map((c: any) => c.id)))
+    orphanContracts = all.filter((c: any) => !inProject.has(c.id))
+    awaitingSig = all.filter((c: any) => c.awaitingMySignature)
+  }
+} catch {}
+
+// ── Helpers ─────────────────────────────────────────────────────────────────
+// Full prose for process rows (has plenty of space)
+function statusProse(c: any): string {
+  const raw = c.recipientName || c.recipientEmail?.split('@')[0] || 'counterparty'
+  const n = raw.split(' ')[0]
+  switch (c.status) {
+    case 'draft':             return 'Draft'
+    case 'sent':              return `Waiting on ${n}`
+    case 'ai_processing':     return 'Analysing…'
+    case 'replied':           return `${n} proposed changes`
+    case 'negotiating':       return `Negotiating with ${n}`
+    case 'out_for_signature': return 'Awaiting signatures'
+    case 'partially_signed':  return 'Partially signed'
+    case 'completed':
+    case 'signed':            return 'Executed'
+    case 'declined':          return `Declined by ${n}`
+    case 'received':          return `Received from ${n}`
+    default: return c.status
+  }
+}
+
+// Short label for asset cards — 120px wide, must never overflow
+function statusShort(status: string): string {
+  switch (status) {
+    case 'draft':             return 'Draft'
+    case 'sent':              return 'Sent'
+    case 'ai_processing':     return 'Analysing…'
+    case 'replied':           return 'Changes in'
+    case 'negotiating':       return 'Negotiating'
+    case 'out_for_signature': return 'Signing'
+    case 'partially_signed':  return 'Partly signed'
+    case 'completed':
+    case 'signed':            return 'Executed'
+    case 'declined':          return 'Declined'
+    case 'received':          return 'Received'
+    default: return status
+  }
+}
+
+function urgency(status: string): string {
+  if (['replied','negotiating','received','ai_processing'].includes(status)) return 'urgent'
+  if (['out_for_signature','partially_signed'].includes(status)) return 'active'
+  if (['signed','completed'].includes(status)) return 'done'
+  if (status === 'declined') return 'declined'
+  if (status === 'draft') return 'draft'
+  return 'neutral'
+}
+
+function cta(c: any): string {
+  if (c.awaitingMySignature) return 'Sign now'
+  switch (c.status) {
+    case 'replied': case 'negotiating': case 'ai_processing': return 'Review'
+    case 'out_for_signature': case 'partially_signed': return 'Track'
+    case 'signed': case 'completed': return 'Download'
+    case 'sent': return 'View'
+    default: return 'Open'
+  }
+}
+
+function isCtaUrgent(c: any): boolean {
+  return c.awaitingMySignature || ['replied','negotiating','received','ai_processing'].includes(c.status)
+}
+
+function avatarStyle(name?: string | null): string {
+  if (!name) return 'background:#9CA3AF;color:#fff'
+  const p = [
+    'background:linear-gradient(135deg,#667EEA,#764BA2);color:#fff',
+    'background:linear-gradient(135deg,#F5576C,#C0392B);color:#fff',
+    'background:linear-gradient(135deg,#4FACFE,#007CF0);color:#fff',
+    'background:linear-gradient(135deg,#0BAB64,#3BB78F);color:#fff',
+    'background:linear-gradient(135deg,#FA709A,#EE0979);color:#fff',
+    'background:linear-gradient(135deg,#A18CD1,#7B2FBE);color:#fff',
+  ]
+  return p[(name.charCodeAt(0) ?? 0) % p.length]
+}
+
+function initial(name?: string | null): string {
+  return (name ?? '?').trim()[0]?.toUpperCase() ?? '?'
+}
+
+function timeAgo(iso?: string): string {
+  if (!iso) return ''
+  const m = Math.floor((Date.now() - new Date(iso).getTime()) / 60000)
+  if (m < 1) return 'just now'
+  if (m < 60) return `${m}m ago`
+  const h = Math.floor(m / 60)
+  if (h < 24) return `${h}h ago`
+  const d = Math.floor(h / 24)
+  if (d < 7) return `${d}d ago`
+  return `${Math.floor(d / 7)}w ago`
+}
+
+const totalContracts = projectsData.reduce((s: number, p: any) => s + (p.contracts?.length ?? 0), 0) + orphanContracts.length
+const isEmpty = totalContracts === 0
+const hasNoProjects = projectsData.length === 0
+
+// Total count per project for sidebar badge
+const allContracts = [...projectsData.flatMap((p: any) => p.contracts ?? []), ...orphanContracts]
+---
+
+<AppLayout title="Contracts — Genie AI" user={user} apiUrl={apiUrl}>
+  <div class="shell">
+
+    {/* ── Sidebar ───────────────────────────────────────────────────── */}
+    <aside class="sidebar">
+      <div class="sidebar__top">
+        <span class="sidebar__section-label">WORKSPACE</span>
+        <button class="sidebar__item sidebar__item--all sidebar__item--active" data-nav="all">
+          <svg class="sidebar__item-icon" width="14" height="14" viewBox="0 0 24 24" fill="none">
+            <rect x="3" y="3" width="7" height="7" rx="1" stroke="currentColor" stroke-width="1.8"/>
+            <rect x="14" y="3" width="7" height="7" rx="1" stroke="currentColor" stroke-width="1.8"/>
+            <rect x="3" y="14" width="7" height="7" rx="1" stroke="currentColor" stroke-width="1.8"/>
+            <rect x="14" y="14" width="7" height="7" rx="1" stroke="currentColor" stroke-width="1.8"/>
+          </svg>
+          All contracts
+          {totalContracts > 0 && <span class="sidebar__badge">{totalContracts}</span>}
+        </button>
+      </div>
+
+      {projectsData.length > 0 && (
+        <div class="sidebar__section">
+          <span class="sidebar__section-label">PROJECTS</span>
+          {projectsData.map((p: any) => (
+            <button class="sidebar__item" data-nav={p.id}>
+              <span class="sidebar__item-dot"></span>
+              <span class="sidebar__item-name">{p.name}</span>
+              {(p.contracts?.length ?? 0) > 0 && (
+                <span class="sidebar__badge sidebar__badge--muted">{p.contracts.length}</span>
+              )}
+            </button>
+          ))}
+          {orphanContracts.length > 0 && (
+            <button class="sidebar__item" data-nav="orphan">
+              <span class="sidebar__item-dot sidebar__item-dot--muted"></span>
+              <span class="sidebar__item-name" style="color:var(--color-text-muted)">Other</span>
+              <span class="sidebar__badge sidebar__badge--muted">{orphanContracts.length}</span>
+            </button>
+          )}
+        </div>
+      )}
+
+      <div class="sidebar__bottom">
+        <button class="btn-primary sidebar__new-proj-btn" id="sideNewProjBtn">+ New project</button>
+      </div>
+    </aside>
+
+    {/* ── Main ──────────────────────────────────────────────────────── */}
+    <main class="app-main">
+
+      {/* Sign-now strip */}
+      {awaitingSig.length > 0 && (
+        <div class="sign-strip">
+          <span class="sign-strip__pulse"></span>
+          <span class="sign-strip__text">
+            {awaitingSig.length === 1
+              ? `${awaitingSig[0].title} needs your signature`
+              : `${awaitingSig.length} contracts need your signature`}
+          </span>
+          <a href={`/contracts/${awaitingSig[0].id}`} class="btn-primary sign-strip__cta">Sign now</a>
+        </div>
+      )}
+
+      {/* Demo seed banner */}
+      {hasNoProjects && !isEmpty && (
+        <div class="seed-banner">
+          <div class="seed-banner__copy">
+            <strong>Load the demo library</strong>
+            <span>Acme Corp + Beta Technologies — NDA, service agreement, negotiation diff</span>
+          </div>
+          <button class="btn-primary" id="seedBtn">Load demo</button>
+          <p id="seedHint" class="seed-banner__hint"></p>
+        </div>
+      )}
+
+      {/* Empty state */}
+      {isEmpty && (
+        <div class="empty">
+          <div class="empty__icon">
+            <svg width="48" height="48" viewBox="0 0 24 24" fill="none">
+              <path d="M12 2L20 7V17L12 22L4 17V7Z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>
+              <path d="M12 7V12L15.5 14" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </div>
+          <h2>Your contract workspace</h2>
+          <p>Create contracts with AI, send for review, negotiate, sign.</p>
+          <div class="empty__btns">
+            <a href="/create" class="btn-primary">Create a contract</a>
+            <button class="btn-ghost" id="seedBtn">Load demo library</button>
+          </div>
+          <p id="seedHint" class="empty__hint"></p>
+        </div>
+      )}
+
+      {/* Project views */}
+      {!isEmpty && (
+        <>
+          {projectsData.map((project: any) => {
+            const assets: any[] = project.contracts ?? []
+            const processes = assets.filter((c: any) => c.status !== 'draft')
+            return (
+              <section class="proj-view" data-project={project.id}>
+                <header class="proj-header">
+                  <div class="proj-header__text">
+                    <h1 class="proj-name">{project.name}</h1>
+                    {project.description && <p class="proj-desc">{project.description}</p>}
+                  </div>
+                  <a href={`/create?projectId=${project.id}`} class="btn-primary proj-header__cta">
+                    + Contract
+                  </a>
+                </header>
+
+                {/* Assets — horizontal doc thumbnails */}
+                <section class="assets-wrap">
+                  <span class="section-label">ASSETS</span>
+                  <div class="assets-row">
+                    {assets.map((c: any) => (
+                      <a href={`/contracts/${c.id}`} class="asset-card">
+                        <div class="asset-doc">
+                          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" aria-hidden="true" class="asset-doc__icon">
+                            <path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7l-4-4Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+                            <path d="M14 3v4h4" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+                            <path d="M8 13h8M8 17h5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                          </svg>
+                        </div>
+                        <h3 class="asset-card__title">{c.title}</h3>
+                      </a>
+                    ))}
+                    <a href={`/create?projectId=${project.id}`} class="asset-card asset-card--new">
+                      <div class="asset-new-icon">+</div>
+                      <span class="asset-new-label">New</span>
+                    </a>
+                  </div>
+                </section>
+
+                {/* Processes — active threads */}
+                {processes.length > 0 && (
+                  <section class="processes-wrap">
+                    <span class="section-label">IN PROGRESS</span>
+                    <div class="process-list">
+                      {processes.map((c: any, idx: number) => (
+                        <a href={`/contracts/${c.id}`} class={`proc proc--${urgency(c.status)}`} style={`--i:${idx}`}>
+                          <div class="proc__stripe"></div>
+                          <div class="proc__body">
+                            <div class="proc__top">
+                              <span class="proc__title">{c.title}</span>
+                            </div>
+                            <div class="proc__bottom">
+                              {(c.recipientName || c.recipientEmail) && (
+                                <div class="proc__person">
+                                  <span class="proc__avatar" style={avatarStyle(c.recipientName || c.recipientEmail)}>
+                                    {initial(c.recipientName || c.recipientEmail)}
+                                  </span>
+                                  <span class="proc__person-name">{c.recipientName || c.recipientEmail}</span>
+                                </div>
+                              )}
+                              <div class="proc__meta">
+                                <span class={`proc__status proc__status--${urgency(c.status)}`}>{statusProse(c)}</span>
+                                {c.updatedAt && <span class="proc__time">{timeAgo(c.updatedAt)}</span>}
+                              </div>
+                            </div>
+                          </div>
+                          <div class="proc__cta-wrap">
+                            <span class={isCtaUrgent(c) ? 'proc__cta proc__cta--urgent' : 'proc__cta'}>{cta(c)} →</span>
+                          </div>
+                        </a>
+                      ))}
+                    </div>
+                  </section>
+                )}
+              </section>
+            )
+          })}
+
+          {/* Orphan contracts */}
+          {orphanContracts.length > 0 && (
+            <section class="proj-view" data-project="orphan">
+              <header class="proj-header">
+                <div class="proj-header__text">
+                  <h1 class="proj-name proj-name--muted">Other contracts</h1>
+                </div>
+              </header>
+              <section class="assets-wrap">
+                <span class="section-label">ASSETS</span>
+                <div class="assets-row">
+                  {orphanContracts.map((c: any) => (
+                    <a href={`/contracts/${c.id}`} class="asset-card">
+                      <div class="asset-doc">
+                        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" aria-hidden="true" class="asset-doc__icon">
+                          <path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7l-4-4Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+                          <path d="M14 3v4h4" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+                          <path d="M8 13h8M8 17h5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                        </svg>
+                      </div>
+                      <h3 class="asset-card__title">{c.title}</h3>
+                    </a>
+                  ))}
+                </div>
+              </section>
+              {orphanContracts.filter((c: any) => c.status !== 'draft').length > 0 && (
+                <section class="processes-wrap">
+                  <span class="section-label">IN PROGRESS</span>
+                  <div class="process-list">
+                    {orphanContracts.filter((c: any) => c.status !== 'draft').map((c: any, idx: number) => (
+                      <a href={`/contracts/${c.id}`} class={`proc proc--${urgency(c.status)}`} style={`--i:${idx}`}>
+                        <div class="proc__stripe"></div>
+                        <div class="proc__body">
+                          <div class="proc__top">
+                            <span class="proc__title">{c.title}</span>
+                          </div>
+                          <div class="proc__bottom">
+                            {(c.recipientName || c.recipientEmail) && (
+                              <div class="proc__person">
+                                <span class="proc__avatar" style={avatarStyle(c.recipientName || c.recipientEmail)}>
+                                  {initial(c.recipientName || c.recipientEmail)}
+                                </span>
+                                <span class="proc__person-name">{c.recipientName || c.recipientEmail}</span>
+                              </div>
+                            )}
+                            <div class="proc__meta">
+                              <span class={`proc__status proc__status--${urgency(c.status)}`}>{statusProse(c)}</span>
+                              {c.updatedAt && <span class="proc__time">{timeAgo(c.updatedAt)}</span>}
+                            </div>
+                          </div>
+                        </div>
+                        <div class="proc__cta-wrap">
+                          <span class={isCtaUrgent(c) ? 'proc__cta proc__cta--urgent' : 'proc__cta'}>{cta(c)} →</span>
+                        </div>
+                      </a>
+                    ))}
+                  </div>
+                </section>
+              )}
+            </section>
+          )}
+        </>
+      )}
+
+    </main>
+  </div>
+
+  {/* New project modal */}
+  <div class="modal-scrim" id="projModal" hidden>
+    <div class="modal" role="dialog" aria-modal="true">
+      <h2 class="modal__title">New project</h2>
+      <form id="projForm">
+        <label class="modal__label" for="projName">Name</label>
+        <input id="projName" type="text" class="form-input" placeholder="Acme Corp, Q3 Deals…" required autocomplete="off" />
+        <label class="modal__label" for="projDesc" style="margin-top:0.75rem">Description <span style="font-weight:400;color:var(--color-text-muted)">(optional)</span></label>
+        <input id="projDesc" type="text" class="form-input" placeholder="Brief description" />
+        <p id="projErr" class="error-banner"></p>
+        <div class="modal__actions">
+          <button type="submit" class="btn-primary">Create</button>
+          <button type="button" id="projCancel" class="btn-ghost">Cancel</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</AppLayout>
+
+
+<script define:vars={{ apiUrl }}>
+  // ── Sidebar project navigation ─────────────────────────────────────────────
+  function showProject(id) {
+    document.querySelectorAll('.proj-view').forEach(el => {
+      el.hidden = id !== 'all' && el.dataset.project !== id
+    })
+    document.querySelectorAll('.sidebar__item').forEach(el => {
+      el.classList.toggle('sidebar__item--active', el.dataset.nav === id)
+    })
+  }
+
+  document.querySelectorAll('.sidebar__item[data-nav]').forEach(btn => {
+    btn.addEventListener('click', () => showProject(btn.dataset.nav))
+  })
+
+  // ── Seed demo ─────────────────────────────────────────────────────────────
+  document.querySelectorAll('#seedBtn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      btn.disabled = true; btn.textContent = 'Loading…'
+      const hint = document.getElementById('seedHint')
+      if (hint) hint.textContent = 'Creating demo contracts…'
+      try {
+        const res = await fetch(`${apiUrl}/api/seed/demo`, { method: 'POST', credentials: 'include' })
+        if ((await res.json()).ok) { if (hint) hint.textContent = 'Done. Reloading…'; setTimeout(() => location.reload(), 600) }
+      } catch { if (hint) hint.textContent = 'Network error.'; btn.disabled = false; btn.textContent = 'Load demo' }
+    })
+  })
+
+  // ── New project modal ──────────────────────────────────────────────────────
+  const modal = document.getElementById('projModal')
+  const form  = document.getElementById('projForm')
+  const err   = document.getElementById('projErr')
+  const openModal = () => { if (modal) modal.hidden = false }
+  const closeModal = () => { if (modal) modal.hidden = true }
+  document.getElementById('sideNewProjBtn')?.addEventListener('click', openModal)
+  document.getElementById('projCancel')?.addEventListener('click', closeModal)
+  modal?.addEventListener('click', e => { if (e.target === modal) closeModal() })
+  form?.addEventListener('submit', async e => {
+    e.preventDefault()
+    const name = document.getElementById('projName')?.value?.trim()
+    const desc = document.getElementById('projDesc')?.value?.trim()
+    if (!name) return
+    const btn = form.querySelector('[type=submit]')
+    if (btn) { btn.disabled = true; btn.textContent = 'Creating…' }
+    try {
+      const res = await fetch(`${apiUrl}/api/projects`, {
+        method: 'POST', credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, description: desc || null }),
+      })
+      if (res.ok) { location.reload() }
+      else {
+        const d = await res.json().catch(() => ({}))
+        if (err) err.textContent = d.error ?? 'Failed'
+        if (btn) { btn.disabled = false; btn.textContent = 'Create' }
+      }
+    } catch {
+      if (err) err.textContent = 'Network error'
+      if (btn) { btn.disabled = false; btn.textContent = 'Create' }
+    }
+  })
+
+  // ── SSE live refresh ───────────────────────────────────────────────────────
+  try {
+    const es = new EventSource(`${apiUrl}/api/events`, { withCredentials: true })
+    es.onmessage = () => setTimeout(() => location.reload(), 1000)
+    es.onerror = () => es.close()
+  } catch {}
+</script>

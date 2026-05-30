@@ -1,0 +1,2 @@
+-- Baseline migration was already applied to the existing database before
+-- this repository copy was missing the SQL file.

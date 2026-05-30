@@ -1,0 +1,485 @@
+---
+import AppLayout from '../layouts/AppLayout.astro'
+
+const apiUrl = import.meta.env.PUBLIC_API_URL || 'http://localhost:8080'
+
+let user: any = null
+
+try {
+  const sessionRes = await fetch(`${apiUrl}/api/auth/get-session`, {
+    headers: { cookie: Astro.request.headers.get('cookie') ?? '' },
+  })
+  if (!sessionRes.ok) return Astro.redirect('/')
+  const session = await sessionRes.json()
+  if (!session?.user) return Astro.redirect('/')
+  user = session.user
+} catch {
+  return Astro.redirect('/?error=service_unavailable')
+}
+---
+<AppLayout title="Upload Contract — Genie AI" user={user} apiUrl={apiUrl}>
+  <main class="upload-main">
+    <div class="upload-back">
+      <a href="/dashboard" class="back-link">← Back to Dashboard</a>
+    </div>
+
+    <header class="upload-header">
+      <h1 class="upload-heading">Upload a contract</h1>
+      <p class="upload-sub">Drop a PDF below. We'll set it up as a draft so you can send it for review or signature.</p>
+    </header>
+
+    <form id="uploadForm" class="upload-form" novalidate>
+      {/* ---------- Step 1: Drop zone ---------- */}
+      <div id="dropZone" class="dropzone" data-state="empty" aria-label="File drop area" tabindex="0">
+        <div class="dropzone__empty">
+          <div class="dropzone__icon" aria-hidden="true">
+            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M14 3H8a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V7l-4-4Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+              <path d="M14 3v4h4" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+              <path d="M12 17v-6m0 0-2.5 2.5M12 11l2.5 2.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </div>
+          <p class="dropzone__primary">Drag your contract here</p>
+          <p class="dropzone__or">or</p>
+          <label for="file" class="btn-ghost dropzone__browse">Browse files</label>
+          <p class="dropzone__hint">PDF only · max 10MB</p>
+        </div>
+
+        <div class="dropzone__selected">
+          <div class="filechip">
+            <span class="filechip__icon" aria-hidden="true">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M14 3H8a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V7l-4-4Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+                <path d="M14 3v4h4" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+              </svg>
+            </span>
+            <div class="filechip__meta">
+              <span id="fileName" class="filechip__name"></span>
+              <span id="fileSize" class="filechip__size"></span>
+            </div>
+            <button type="button" id="removeFileBtn" class="filechip__remove" aria-label="Remove file">×</button>
+          </div>
+        </div>
+
+        <input
+          type="file"
+          id="file"
+          name="file"
+          class="dropzone__input"
+          accept="application/pdf"
+          required
+        />
+      </div>
+
+      {/* ---------- Step 2: Name + submit (appears after a file is chosen) ---------- */}
+      <div id="step2" class="step2" hidden>
+        <label for="title" class="step2__label">Contract name</label>
+        <input
+          type="text"
+          id="title"
+          name="title"
+          class="step2__input"
+          placeholder="e.g. NDA with Acme Corp"
+          required
+        />
+        <div id="progressBar" class="progress-bar progress-bar--hidden">
+          <div id="progressFill" class="progress-bar__fill" style="width: 0%"></div>
+        </div>
+        <button type="submit" id="submitBtn" class="btn-primary btn-lg step2__submit">
+          <span id="submitLabel">Upload Contract</span>
+        </button>
+        <p id="uploadError" class="error-banner" aria-live="polite"></p>
+      </div>
+    </form>
+  </main>
+</AppLayout>
+
+<style>
+  .upload-main {
+    padding: 2.5rem 2rem 4rem;
+    max-width: 640px;
+    margin: 0 auto;
+  }
+
+  .upload-back {
+    margin-bottom: 1.25rem;
+  }
+
+  .back-link {
+    color: var(--color-text-muted);
+    text-decoration: none;
+    font-size: 0.9em;
+  }
+
+  .back-link:hover {
+    color: var(--color-accent);
+  }
+
+  .upload-header {
+    margin-bottom: 1.75rem;
+  }
+
+  .upload-heading {
+    font-size: 1.75rem;
+    font-weight: var(--font-weight-bold);
+    color: var(--color-text-primary);
+    margin: 0 0 0.5rem;
+    letter-spacing: -0.01em;
+  }
+
+  .upload-sub {
+    margin: 0;
+    color: var(--color-text-muted);
+    font-size: 0.95rem;
+    line-height: 1.5;
+  }
+
+  .upload-form {
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+  }
+
+  /* ---------- Drop zone ---------- */
+  .dropzone {
+    position: relative;
+    background: var(--color-bg-subtle);
+    border: 2px dashed var(--color-border-mid);
+    border-radius: var(--radius-card);
+    transition: border-color 0.15s ease, background 0.15s ease, padding 0.2s ease;
+  }
+
+  .dropzone[data-state="empty"] {
+    min-height: 220px;
+    padding: 2rem 1.5rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .dropzone[data-state="empty"] .dropzone__selected { display: none; }
+  .dropzone[data-state="selected"] .dropzone__empty { display: none; }
+
+  .dropzone[data-state="dragover"] {
+    border-color: var(--color-accent);
+    background: var(--color-border-light);
+  }
+
+  .dropzone[data-state="selected"] {
+    padding: 1rem 1.25rem;
+    background: var(--color-bg-white);
+    border-style: solid;
+    border-color: var(--color-border-default);
+  }
+
+  .dropzone__empty {
+    text-align: center;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .dropzone__icon {
+    color: var(--color-border-mid);
+    line-height: 0;
+    margin-bottom: 0.25rem;
+  }
+
+  .dropzone__primary {
+    margin: 0;
+    font-size: 1rem;
+    font-weight: var(--font-weight-semibold);
+    color: var(--color-text-primary);
+  }
+
+  .dropzone__or {
+    margin: 0;
+    color: var(--color-text-muted);
+    font-size: 0.8rem;
+  }
+
+  .dropzone__browse {
+    cursor: pointer;
+    padding: 0.5rem 1.1rem;
+    font-size: 0.875rem;
+  }
+
+  .dropzone__hint {
+    margin: 0.25rem 0 0;
+    font-size: 0.75rem;
+    color: var(--color-text-muted);
+  }
+
+  .dropzone__input {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0,0,0,0);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  /* ---------- Selected file chip ---------- */
+  .dropzone__selected { width: 100%; }
+
+  .filechip {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+  }
+
+  .filechip__icon {
+    color: var(--color-accent);
+    background: var(--color-border-light);
+    border-radius: var(--radius-input);
+    padding: 0.5rem;
+    display: inline-flex;
+    line-height: 0;
+  }
+
+  .filechip__meta {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    flex: 1;
+  }
+
+  .filechip__name {
+    font-size: 0.9rem;
+    font-weight: var(--font-weight-semibold);
+    color: var(--color-text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .filechip__size {
+    font-size: 0.75rem;
+    color: var(--color-text-muted);
+  }
+
+  .filechip__remove {
+    background: none;
+    border: none;
+    color: var(--color-text-muted);
+    font-size: 1.5rem;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0.25rem 0.5rem;
+    border-radius: var(--radius-input);
+    transition: background 0.15s ease, color 0.15s ease;
+  }
+  .filechip__remove:hover {
+    background: var(--color-bg-subtle);
+    color: var(--color-text-primary);
+  }
+
+  /* ---------- Step 2 ---------- */
+  .step2 {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    animation: step2-in 0.18s ease-out;
+  }
+  @keyframes step2-in {
+    from { opacity: 0; transform: translateY(4px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  .step2__label {
+    font-size: 0.875rem;
+    font-weight: var(--font-weight-semibold);
+    color: var(--color-text-primary);
+  }
+
+  .step2__input {
+    width: 100%;
+    padding: 0.625rem 0.875rem;
+    border: 1px solid var(--color-border-default);
+    border-radius: var(--radius-input);
+    font-family: var(--font-family-base);
+    font-size: 0.9375rem;
+    color: var(--color-text-primary);
+    background: var(--color-bg-white);
+    box-sizing: border-box;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  }
+  .step2__input:focus {
+    outline: none;
+    border-color: var(--color-accent);
+    box-shadow: 0 0 0 3px var(--color-border-light);
+  }
+
+  .progress-bar--hidden { display: none; }
+
+  .step2__submit {
+    margin-top: 0.25rem;
+  }
+</style>
+
+<script define:vars={{ apiUrl }}>
+  const form        = document.getElementById('uploadForm');
+  const dropZone    = document.getElementById('dropZone');
+  const fileInput   = document.getElementById('file');
+  const fileName    = document.getElementById('fileName');
+  const fileSize    = document.getElementById('fileSize');
+  const removeBtn   = document.getElementById('removeFileBtn');
+  const step2       = document.getElementById('step2');
+  const titleInput  = document.getElementById('title');
+  const submitBtn   = document.getElementById('submitBtn');
+  const submitLabel = document.getElementById('submitLabel');
+  const errorEl     = document.getElementById('uploadError');
+  const progressBar = document.getElementById('progressBar');
+  const progressFill= document.getElementById('progressFill');
+
+  const MAX_BYTES = 10 * 1024 * 1024; // 10 MB
+
+  function setError(msg) {
+    if (errorEl) errorEl.textContent = msg ?? '';
+  }
+
+  function formatSize(bytes) {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+  }
+
+  function prettyName(filename) {
+    const stem = filename.replace(/\.[^.]+$/, '');
+    const cleaned = stem.replace(/[_-]+/g, ' ').trim();
+    return cleaned.replace(/\b\w/g, (c) => c.toUpperCase());
+  }
+
+  function acceptFile(file) {
+    setError('');
+    if (file.type !== 'application/pdf' && !file.name.toLowerCase().endsWith('.pdf')) {
+      setError('Only PDF files are accepted.');
+      return false;
+    }
+    if (file.size > MAX_BYTES) {
+      setError('File is larger than 10MB.');
+      return false;
+    }
+    // Mirror file into the hidden <input> so FormData picks it up
+    const dt = new DataTransfer();
+    dt.items.add(file);
+    fileInput.files = dt.files;
+
+    fileName.textContent = file.name;
+    fileSize.textContent = formatSize(file.size);
+    dropZone.setAttribute('data-state', 'selected');
+
+    if (!titleInput.value) titleInput.value = prettyName(file.name);
+    step2.hidden = false;
+    titleInput.focus();
+    return true;
+  }
+
+  function clearFile() {
+    fileInput.value = '';
+    dropZone.setAttribute('data-state', 'empty');
+    step2.hidden = true;
+    titleInput.value = '';
+    progressBar.classList.add('progress-bar--hidden');
+    progressFill.style.width = '0%';
+    setError('');
+  }
+
+  // ---------- Drag and drop ----------
+  ['dragenter', 'dragover'].forEach((evt) => {
+    dropZone.addEventListener(evt, (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (dropZone.getAttribute('data-state') === 'selected') return;
+      dropZone.setAttribute('data-state', 'dragover');
+    });
+  });
+  ['dragleave', 'dragend'].forEach((evt) => {
+    dropZone.addEventListener(evt, (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (dropZone.getAttribute('data-state') === 'dragover') {
+        dropZone.setAttribute('data-state', 'empty');
+      }
+    });
+  });
+  dropZone.addEventListener('drop', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const file = e.dataTransfer?.files?.[0];
+    if (file) acceptFile(file);
+    else dropZone.setAttribute('data-state', 'empty');
+  });
+
+  // ---------- File input change ----------
+  fileInput.addEventListener('change', () => {
+    const file = fileInput.files?.[0];
+    if (file) acceptFile(file);
+  });
+
+  // ---------- Remove file ----------
+  removeBtn.addEventListener('click', clearFile);
+
+  // ---------- Submit ----------
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    setError('');
+
+    if (!fileInput.files?.[0]) {
+      setError('Please choose a PDF to upload.');
+      return;
+    }
+    if (!titleInput.value.trim()) {
+      setError('Please give the contract a name.');
+      titleInput.focus();
+      return;
+    }
+
+    submitBtn.disabled = true;
+    submitLabel.textContent = 'Uploading…';
+
+    // Fake progress to 90% over ~3s; jumps to 100% on success
+    progressBar.classList.remove('progress-bar--hidden');
+    let pct = 0;
+    const ticker = setInterval(() => {
+      pct = Math.min(90, pct + 6);
+      progressFill.style.width = `${pct}%`;
+      if (pct >= 90) clearInterval(ticker);
+    }, 200);
+
+    const formData = new FormData(form);
+    try {
+      const res = await fetch(`${apiUrl}/api/contracts/upload`, {
+        method: 'POST',
+        body: formData,
+        credentials: 'include',
+      });
+
+      clearInterval(ticker);
+
+      if (res.ok) {
+        progressFill.style.width = '100%';
+        const { contractId } = await res.json();
+        window.location.href = `/contracts/${contractId}`;
+      } else {
+        const err = await res.json().catch(() => ({}));
+        setError(`Upload failed: ${err.error ?? 'Unknown error'}`);
+        submitBtn.disabled = false;
+        submitLabel.textContent = 'Upload Contract';
+        progressBar.classList.add('progress-bar--hidden');
+        progressFill.style.width = '0%';
+      }
+    } catch {
+      clearInterval(ticker);
+      setError('Network error during upload.');
+      submitBtn.disabled = false;
+      submitLabel.textContent = 'Upload Contract';
+      progressBar.classList.add('progress-bar--hidden');
+      progressFill.style.width = '0%';
+    }
+  });
+</script>

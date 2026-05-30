@@ -1,0 +1,1079 @@
+---
+import AppLayout from '../../layouts/AppLayout.astro'
+
+const { token } = Astro.params
+const apiUrl = import.meta.env.PUBLIC_API_URL || 'http://localhost:8080'
+
+type ReviewMessage = {
+  id: string
+  role: 'user' | 'assistant'
+  content: string
+  suggestedText: string | null
+}
+
+let sessionData: {
+  id: string
+  status: string
+  workingText: string
+  contractTitle: string
+  counterpartyEmail: string | null
+} | null = null
+let originalText = ''
+let messages: ReviewMessage[] = []
+let loadError: string | null = null
+
+try {
+  const res = await fetch(`${apiUrl}/api/review/${token}`)
+  if (res.ok) {
+    const body = await res.json()
+    sessionData = body.session
+    originalText = body.originalText ?? ''
+    messages = body.messages ?? []
+  } else if (res.status === 404) {
+    loadError = 'not_found'
+  } else {
+    loadError = 'error'
+  }
+} catch {
+  loadError = 'unavailable'
+}
+
+const alreadySubmitted = sessionData?.status === 'submitted'
+---
+<AppLayout title={sessionData ? `Review: ${sessionData.contractTitle}` : 'Review Contract'} user={null} apiUrl={apiUrl}>
+  {loadError === 'not_found' && (
+    <div class="rv-error-page">
+      <div class="rv-error-card">
+        <div class="rv-error-icon">404</div>
+        <h1 class="rv-error-title">Review link not found</h1>
+        <p class="rv-error-body">This review link is invalid or has expired. Contact the sender for a new link.</p>
+      </div>
+    </div>
+  )}
+
+  {(loadError === 'error' || loadError === 'unavailable') && (
+    <div class="rv-error-page">
+      <div class="rv-error-card">
+        <div class="rv-error-icon">⚠</div>
+        <h1 class="rv-error-title">Could not load review</h1>
+        <p class="rv-error-body">We could not reach the server. Please try refreshing the page.</p>
+      </div>
+    </div>
+  )}
+
+  {alreadySubmitted && (
+    <div class="rv-error-page">
+      <div class="rv-error-card rv-error-card--success">
+        <div class="rv-error-icon rv-error-icon--success">✓</div>
+        <h1 class="rv-error-title">Changes already submitted</h1>
+        <p class="rv-error-body">Your proposed changes for <strong>{sessionData!.contractTitle}</strong> have already been sent back to the sender. Thank you.</p>
+      </div>
+    </div>
+  )}
+
+  {!loadError && !alreadySubmitted && sessionData && (
+    <div class="rv-root" id="rvRoot">
+
+      {/* ── Header ─────────────────────────────────────────────────── */}
+      <header class="rv-header">
+        <div class="rv-header__logo">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d="M12 2 L20 7 V17 L12 22 L4 17 V7 Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" fill="none" />
+            <path d="M12 7 V12 L15.5 14" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+          <span class="rv-header__brand">Genie AI</span>
+        </div>
+        <div class="rv-header__center">
+          <span class="rv-header__title" id="rvTitle">{sessionData.contractTitle}</span>
+          <span class="rv-header__badge" id="rvChangeBadge" hidden>Changes pending</span>
+        </div>
+        <button class="rv-btn-primary" id="sendBackBtn">Send changes back</button>
+      </header>
+
+      {/* ── Main workspace ─────────────────────────────────────────── */}
+      <div class="rv-workspace">
+
+        {/* ── Left: Document editor ─────────────────────────────────── */}
+        <div class="rv-doc-panel">
+          <div class="rv-panel-head">
+            <div class="rv-tabs" role="tablist">
+              <button class="rv-tab rv-tab--active" id="editTab" role="tab" aria-selected="true">Edit</button>
+              <button class="rv-tab" id="diffTab" role="tab" aria-selected="false">Preview changes</button>
+            </div>
+            <span class="rv-status-text" id="rvStatus">No changes</span>
+          </div>
+
+          <textarea
+            class="rv-editor"
+            id="rvEditor"
+            spellcheck="false"
+            placeholder={originalText ? '' : 'Contract text could not be extracted. Please refer to the attached PDF.'}
+          >{sessionData.workingText}</textarea>
+
+          <div class="rv-diff-view" id="rvDiffView" hidden></div>
+        </div>
+
+        {/* ── Right: AI Assistant ────────────────────────────────────── */}
+        <div class="rv-ai-panel">
+          <div class="rv-panel-head">
+            <span class="rv-panel-label">AI Assistant</span>
+            <span class="rv-ai-hint">Ask me to make a specific change to the contract</span>
+          </div>
+
+          <div class="rv-chat-messages" id="chatMessages">
+            {messages.length === 0 && (
+              <div class="rv-chat-empty">
+                <p>No messages yet. Ask the AI to help you propose changes to the contract.</p>
+                <p class="rv-chat-example">Examples: "Change payment terms to 45 days" · "Remove the exclusivity clause" · "Add a 30-day notice period"</p>
+              </div>
+            )}
+            {messages.map((m) => (
+              <div class={`rv-msg rv-msg--${m.role}`} data-suggestion={m.suggestedText ? 'true' : 'false'}>
+                <div class="rv-msg__bubble">
+                  <p class="rv-msg__text">{m.content}</p>
+                  {m.suggestedText && (
+                    <div class="rv-msg__suggestion">
+                      <details class="rv-diff-details">
+                        <summary class="rv-diff-toggle">Show diff</summary>
+                        <div class="rv-diff-inline" data-original="" data-suggested={m.suggestedText}></div>
+                      </details>
+                      <div class="rv-msg__actions">
+                        <button class="rv-btn-accent rv-apply-btn" data-suggested={m.suggestedText}>Apply suggestion</button>
+                        <button class="rv-btn-ghost rv-decline-btn">Dismiss</button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <form class="rv-chat-form" id="chatForm">
+            <textarea
+              id="chatInput"
+              class="rv-chat-input"
+              rows="3"
+              placeholder="Ask AI to make a change…"
+            ></textarea>
+            <div class="rv-chat-foot">
+              <span class="rv-chat-hint" id="chatHint"></span>
+              <button type="submit" class="rv-btn-primary rv-chat-send" id="chatSendBtn" disabled>Send →</button>
+            </div>
+          </form>
+        </div>
+      </div>
+
+      {/* ── Submit panel (hidden, slides up) ──────────────────────── */}
+      <div class="rv-submit-panel" id="submitPanel" hidden>
+        <div class="rv-submit-inner">
+          <div class="rv-submit-head">
+            <h2 class="rv-submit-title">Send changes back</h2>
+            <button class="rv-btn-ghost" id="cancelSubmitBtn">Cancel</button>
+          </div>
+          <div class="rv-submit-diff-summary" id="submitDiffSummary"></div>
+          <label class="rv-submit-label" for="submitMessage">Message (optional)</label>
+          <textarea
+            id="submitMessage"
+            class="rv-submit-textarea"
+            rows="3"
+            placeholder="Add a note for the sender about your changes…"
+          ></textarea>
+          <p id="submitError" class="rv-error-text"></p>
+          <div class="rv-submit-actions">
+            <button class="rv-btn-primary rv-btn-lg" id="confirmSubmitBtn">Send changes</button>
+          </div>
+        </div>
+      </div>
+
+      {/* ── Success overlay ────────────────────────────────────────── */}
+      <div class="rv-success" id="rvSuccess" hidden>
+        <div class="rv-success-card">
+          <div class="rv-success-seal">✓</div>
+          <h2 class="rv-success-title">Changes sent!</h2>
+          <p class="rv-success-body" id="rvSuccessBody">Your proposed changes have been sent back to the sender.</p>
+        </div>
+      </div>
+
+    </div>
+  )}
+</AppLayout>
+
+<style>
+  /* ── Error / loading states ────────────────────────────────────── */
+  .rv-error-page {
+    min-height: 80vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 2rem;
+  }
+
+  .rv-error-card {
+    background: var(--color-bg-white);
+    border: 1px solid var(--color-border-default);
+    border-radius: var(--radius-card);
+    padding: 2.5rem 2rem;
+    max-width: 420px;
+    width: 100%;
+    text-align: center;
+    box-shadow: var(--shadow-card);
+  }
+
+  .rv-error-card--success { border-color: #16a34a; }
+
+  .rv-error-icon {
+    font-size: 2rem;
+    font-weight: var(--font-weight-bold);
+    color: var(--color-text-muted);
+    margin-bottom: 1rem;
+  }
+
+  .rv-error-icon--success { color: #16a34a; }
+
+  .rv-error-title {
+    margin: 0 0 0.5rem;
+    font-size: 1.125rem;
+    font-weight: var(--font-weight-bold);
+    color: var(--color-text-primary);
+  }
+
+  .rv-error-body {
+    margin: 0;
+    color: var(--color-text-muted);
+    font-size: 0.9375rem;
+    line-height: 1.5;
+  }
+
+  /* ── Root layout ───────────────────────────────────────────────── */
+  .rv-root {
+    display: flex;
+    flex-direction: column;
+    height: calc(100vh - 0px);
+    overflow: hidden;
+    position: relative;
+  }
+
+  /* ── Header ────────────────────────────────────────────────────── */
+  .rv-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 0.75rem 1.5rem;
+    background: var(--color-bg-white);
+    border-bottom: 1px solid var(--color-border-default);
+    flex-shrink: 0;
+    z-index: 10;
+  }
+
+  .rv-header__logo {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    color: var(--color-accent);
+    flex-shrink: 0;
+  }
+
+  .rv-header__brand {
+    font-size: 0.9375rem;
+    font-weight: var(--font-weight-bold);
+    color: var(--color-text-primary);
+  }
+
+  .rv-header__center {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    justify-content: center;
+  }
+
+  .rv-header__title {
+    font-size: 0.9375rem;
+    font-weight: var(--font-weight-semibold);
+    color: var(--color-text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 340px;
+  }
+
+  .rv-header__badge {
+    font-size: 0.72rem;
+    font-weight: var(--font-weight-semibold);
+    padding: 0.2rem 0.5rem;
+    border-radius: var(--radius-pill);
+    background: #fef9c3;
+    color: #854d0e;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  /* ── Workspace ─────────────────────────────────────────────────── */
+  .rv-workspace {
+    flex: 1;
+    display: grid;
+    grid-template-columns: 55% 1fr;
+    overflow: hidden;
+  }
+
+  @media (max-width: 768px) {
+    .rv-workspace {
+      grid-template-columns: 1fr;
+    }
+  }
+
+  /* ── Panel shared ──────────────────────────────────────────────── */
+  .rv-panel-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 0.625rem 1.25rem;
+    border-bottom: 1px solid var(--color-border-default);
+    background: var(--color-bg-subtle);
+    flex-shrink: 0;
+  }
+
+  .rv-panel-label {
+    font-size: 0.75rem;
+    font-weight: var(--font-weight-semibold);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--color-text-muted);
+  }
+
+  .rv-ai-hint {
+    font-size: 0.8rem;
+    color: var(--color-text-muted);
+  }
+
+  /* ── Document panel ────────────────────────────────────────────── */
+  .rv-doc-panel {
+    display: flex;
+    flex-direction: column;
+    border-right: 1px solid var(--color-border-default);
+    overflow: hidden;
+  }
+
+  .rv-tabs {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.125rem;
+    padding: 0.2rem;
+    background: var(--color-border-default);
+    border-radius: var(--radius-pill);
+  }
+
+  .rv-tab {
+    border: none;
+    background: transparent;
+    font: inherit;
+    font-size: 0.8rem;
+    font-weight: var(--font-weight-semibold);
+    color: var(--color-text-muted);
+    padding: 0.3rem 0.75rem;
+    border-radius: var(--radius-pill);
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+  }
+
+  .rv-tab--active {
+    background: var(--color-bg-white);
+    color: var(--color-text-primary);
+    box-shadow: var(--shadow-subtle);
+  }
+
+  .rv-status-text {
+    font-size: 0.8rem;
+    color: var(--color-text-muted);
+  }
+
+  .rv-status-text--changed {
+    color: #854d0e;
+    font-weight: var(--font-weight-semibold);
+  }
+
+  .rv-editor {
+    flex: 1;
+    resize: none;
+    border: none;
+    outline: none;
+    padding: 1.25rem 1.5rem;
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 0.875rem;
+    line-height: 1.65;
+    color: var(--color-text-primary);
+    background: var(--color-bg-white);
+    overflow-y: auto;
+  }
+
+  .rv-diff-view {
+    flex: 1;
+    overflow-y: auto;
+    padding: 1.25rem 1.5rem;
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 0.875rem;
+    line-height: 1.65;
+    color: var(--color-text-primary);
+    background: var(--color-bg-white);
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  /* ── AI panel ──────────────────────────────────────────────────── */
+  .rv-ai-panel {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    background: var(--color-bg-subtle);
+  }
+
+  .rv-chat-messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 1rem 1rem 0.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.875rem;
+  }
+
+  .rv-chat-empty {
+    padding: 1rem;
+    text-align: center;
+    color: var(--color-text-muted);
+    font-size: 0.875rem;
+    line-height: 1.55;
+  }
+
+  .rv-chat-example {
+    font-size: 0.8rem;
+    color: var(--color-text-muted);
+    margin-top: 0.75rem;
+    font-style: italic;
+  }
+
+  /* ── Chat message bubbles ──────────────────────────────────────── */
+  .rv-msg { display: flex; }
+
+  .rv-msg--user { justify-content: flex-end; }
+  .rv-msg--assistant { justify-content: flex-start; }
+
+  .rv-msg__bubble {
+    max-width: 85%;
+    padding: 0.625rem 0.875rem;
+    border-radius: var(--radius-card);
+    font-size: 0.875rem;
+    line-height: 1.5;
+  }
+
+  .rv-msg--user .rv-msg__bubble {
+    background: var(--color-accent);
+    color: #fff;
+  }
+
+  .rv-msg--assistant .rv-msg__bubble {
+    background: var(--color-bg-white);
+    border: 1px solid var(--color-border-default);
+    color: var(--color-text-primary);
+  }
+
+  .rv-msg__text { margin: 0; white-space: pre-wrap; }
+
+  .rv-msg__suggestion {
+    margin-top: 0.625rem;
+    padding-top: 0.625rem;
+    border-top: 1px solid var(--color-border-default);
+  }
+
+  .rv-diff-details { margin-bottom: 0.5rem; }
+
+  .rv-diff-toggle {
+    cursor: pointer;
+    font-size: 0.8rem;
+    font-weight: var(--font-weight-semibold);
+    color: var(--color-accent);
+    list-style: none;
+    padding: 0.2rem 0;
+  }
+  .rv-diff-toggle::-webkit-details-marker { display: none; }
+  .rv-diff-toggle:hover { text-decoration: underline; }
+
+  .rv-diff-inline {
+    margin-top: 0.5rem;
+    padding: 0.5rem 0.625rem;
+    background: var(--color-bg-subtle);
+    border-radius: var(--radius-input);
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 0.775rem;
+    line-height: 1.55;
+    max-height: 200px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .rv-msg__actions {
+    display: flex;
+    gap: 0.5rem;
+    margin-top: 0.5rem;
+  }
+
+  /* ── Chat input form ───────────────────────────────────────────── */
+  .rv-chat-form {
+    flex-shrink: 0;
+    padding: 0.75rem 1rem;
+    background: var(--color-bg-white);
+    border-top: 1px solid var(--color-border-default);
+  }
+
+  .rv-chat-input {
+    width: 100%;
+    resize: none;
+    border: 1px solid var(--color-border-default);
+    border-radius: var(--radius-input);
+    padding: 0.5rem 0.75rem;
+    font-family: var(--font-family-base);
+    font-size: 0.9rem;
+    line-height: 1.5;
+    color: var(--color-text-primary);
+    background: var(--color-bg-subtle);
+    box-sizing: border-box;
+    transition: border-color 0.15s;
+  }
+
+  .rv-chat-input:focus {
+    outline: none;
+    border-color: var(--color-accent);
+    background: var(--color-bg-white);
+  }
+
+  .rv-chat-foot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-top: 0.5rem;
+    gap: 0.5rem;
+  }
+
+  .rv-chat-hint {
+    font-size: 0.78rem;
+    color: var(--color-text-muted);
+    flex: 1;
+    min-width: 0;
+  }
+
+  .rv-chat-send { flex-shrink: 0; }
+
+  /* ── Submit panel ──────────────────────────────────────────────── */
+  .rv-submit-panel {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    background: var(--color-bg-white);
+    border-top: 1px solid var(--color-border-default);
+    box-shadow: 0 -4px 16px rgba(0,0,0,0.08);
+    z-index: 100;
+    animation: slide-up 0.2s ease-out;
+  }
+
+  @keyframes slide-up {
+    from { transform: translateY(100%); opacity: 0; }
+    to   { transform: translateY(0);   opacity: 1; }
+  }
+
+  .rv-submit-inner {
+    max-width: 640px;
+    margin: 0 auto;
+    padding: 1.5rem 1.5rem 2rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+  }
+
+  .rv-submit-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .rv-submit-title {
+    margin: 0;
+    font-size: 1.0625rem;
+    font-weight: var(--font-weight-bold);
+    color: var(--color-text-primary);
+  }
+
+  .rv-submit-diff-summary {
+    padding: 0.75rem 1rem;
+    background: var(--color-bg-subtle);
+    border-radius: var(--radius-input);
+    font-size: 0.875rem;
+    color: var(--color-text-primary);
+    border: 1px solid var(--color-border-default);
+  }
+
+  .rv-submit-label {
+    font-size: 0.875rem;
+    font-weight: var(--font-weight-semibold);
+    color: var(--color-text-primary);
+  }
+
+  .rv-submit-textarea {
+    width: 100%;
+    resize: vertical;
+    border: 1px solid var(--color-border-default);
+    border-radius: var(--radius-input);
+    padding: 0.5rem 0.75rem;
+    font-family: var(--font-family-base);
+    font-size: 0.9rem;
+    color: var(--color-text-primary);
+    background: var(--color-bg-white);
+    box-sizing: border-box;
+  }
+
+  .rv-submit-textarea:focus {
+    outline: none;
+    border-color: var(--color-accent);
+  }
+
+  .rv-submit-actions {
+    display: flex;
+    justify-content: flex-end;
+  }
+
+  /* ── Diff colors ───────────────────────────────────────────────── */
+  :global(ins.rv-added) {
+    background: #dcfce7;
+    color: #166534;
+    text-decoration: none;
+    border-radius: 2px;
+    padding: 0 1px;
+  }
+
+  :global(del.rv-removed) {
+    background: #fee2e2;
+    color: #991b1b;
+    text-decoration: line-through;
+    border-radius: 2px;
+    padding: 0 1px;
+  }
+
+  /* ── Success overlay ───────────────────────────────────────────── */
+  .rv-success {
+    position: fixed;
+    inset: 0;
+    background: rgba(255,255,255,0.95);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 200;
+    padding: 2rem;
+  }
+
+  .rv-success-card {
+    text-align: center;
+    max-width: 400px;
+  }
+
+  .rv-success-seal {
+    width: 64px;
+    height: 64px;
+    background: #dcfce7;
+    color: #166534;
+    border-radius: 50%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 2rem;
+    font-weight: var(--font-weight-bold);
+    margin: 0 auto 1.25rem;
+  }
+
+  .rv-success-title {
+    margin: 0 0 0.5rem;
+    font-size: 1.375rem;
+    font-weight: var(--font-weight-bold);
+    color: var(--color-text-primary);
+  }
+
+  .rv-success-body {
+    margin: 0;
+    color: var(--color-text-muted);
+    font-size: 0.9375rem;
+    line-height: 1.5;
+  }
+
+  /* ── Buttons ───────────────────────────────────────────────────── */
+  .rv-btn-primary {
+    background: var(--color-accent);
+    color: #fff;
+    border: none;
+    border-radius: var(--radius-button);
+    padding: 0.55rem 1.125rem;
+    font: inherit;
+    font-size: 0.875rem;
+    font-weight: var(--font-weight-semibold);
+    cursor: pointer;
+    transition: opacity 0.15s;
+    white-space: nowrap;
+  }
+  .rv-btn-primary:hover { opacity: 0.88; }
+  .rv-btn-primary:disabled { opacity: 0.45; cursor: default; }
+
+  .rv-btn-primary.rv-btn-lg {
+    padding: 0.7rem 1.5rem;
+    font-size: 0.9375rem;
+  }
+
+  .rv-btn-accent {
+    background: var(--color-brand-mid);
+    color: #fff;
+    border: none;
+    border-radius: var(--radius-button);
+    padding: 0.4rem 0.875rem;
+    font: inherit;
+    font-size: 0.8rem;
+    font-weight: var(--font-weight-semibold);
+    cursor: pointer;
+    transition: opacity 0.15s;
+  }
+  .rv-btn-accent:hover { opacity: 0.88; }
+
+  .rv-btn-ghost {
+    background: none;
+    border: 1px solid var(--color-border-default);
+    border-radius: var(--radius-button);
+    padding: 0.4rem 0.875rem;
+    font: inherit;
+    font-size: 0.8rem;
+    font-weight: var(--font-weight-semibold);
+    color: var(--color-text-muted);
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+  }
+  .rv-btn-ghost:hover { background: var(--color-bg-subtle); color: var(--color-text-primary); }
+
+  .rv-error-text {
+    color: #dc2626;
+    font-size: 0.875rem;
+    margin: 0;
+  }
+</style>
+
+<script define:vars={{ token, apiUrl, originalText, initialMessages: messages }}>
+  // ── State ────────────────────────────────────────────────────────
+  let workingText = document.getElementById('rvEditor')?.value ?? ''
+  let saveTimeout = null
+  let isSubmitting = false
+  let isDiffMode = false
+
+  // ── DOM refs ─────────────────────────────────────────────────────
+  const editor = document.getElementById('rvEditor')
+  const diffView = document.getElementById('rvDiffView')
+  const editTab = document.getElementById('editTab')
+  const diffTab = document.getElementById('diffTab')
+  const rvStatus = document.getElementById('rvStatus')
+  const changeBadge = document.getElementById('rvChangeBadge')
+  const chatMessages = document.getElementById('chatMessages')
+  const chatForm = document.getElementById('chatForm')
+  const chatInput = document.getElementById('chatInput')
+  const chatSendBtn = document.getElementById('chatSendBtn')
+  const chatHint = document.getElementById('chatHint')
+  const sendBackBtn = document.getElementById('sendBackBtn')
+  const submitPanel = document.getElementById('submitPanel')
+  const cancelSubmitBtn = document.getElementById('cancelSubmitBtn')
+  const confirmSubmitBtn = document.getElementById('confirmSubmitBtn')
+  const submitMessage = document.getElementById('submitMessage')
+  const submitError = document.getElementById('submitError')
+  const submitDiffSummary = document.getElementById('submitDiffSummary')
+  const rvSuccess = document.getElementById('rvSuccess')
+  const rvSuccessBody = document.getElementById('rvSuccessBody')
+
+  // ── Diff library (loaded from CDN) ───────────────────────────────
+  let DiffLib = null
+
+  function escHtml(s) {
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  }
+
+  function renderDiffHtml(oldText, newText) {
+    if (!DiffLib) return escHtml(newText)
+    const changes = DiffLib.diffWords(oldText, newText)
+    return changes.map(part => {
+      const escaped = escHtml(part.value)
+      if (part.added) return `<ins class="rv-added">${escaped}</ins>`
+      if (part.removed) return `<del class="rv-removed">${escaped}</del>`
+      return escaped
+    }).join('')
+  }
+
+  function getDiffStats(oldText, newText) {
+    if (!DiffLib) return { added: 0, removed: 0 }
+    const changes = DiffLib.diffWords(oldText, newText)
+    let added = 0, removed = 0
+    for (const part of changes) {
+      const words = part.value.trim().split(/\s+/).filter(Boolean).length
+      if (part.added) added += words
+      else if (part.removed) removed += words
+    }
+    return { added, removed }
+  }
+
+  function updateStatus() {
+    if (!editor) return
+    const hasChanges = workingText !== originalText
+    if (hasChanges) {
+      const stats = getDiffStats(originalText, workingText)
+      rvStatus.textContent = `+${stats.added} words added · −${stats.removed} removed`
+      rvStatus.className = 'rv-status-text rv-status-text--changed'
+      if (changeBadge) changeBadge.hidden = false
+    } else {
+      rvStatus.textContent = 'No changes'
+      rvStatus.className = 'rv-status-text'
+      if (changeBadge) changeBadge.hidden = true
+    }
+
+    if (isDiffMode) {
+      diffView.innerHTML = renderDiffHtml(originalText, workingText)
+    }
+  }
+
+  function scheduleAutoSave() {
+    clearTimeout(saveTimeout)
+    saveTimeout = setTimeout(async () => {
+      try {
+        await fetch(`${apiUrl}/api/review/${token}/text`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: workingText }),
+        })
+      } catch {}
+    }, 1500)
+  }
+
+  // ── Tab switching ────────────────────────────────────────────────
+  if (editTab) {
+    editTab.addEventListener('click', () => {
+      isDiffMode = false
+      editTab.classList.add('rv-tab--active')
+      editTab.setAttribute('aria-selected', 'true')
+      diffTab.classList.remove('rv-tab--active')
+      diffTab.setAttribute('aria-selected', 'false')
+      if (editor) editor.hidden = false
+      if (diffView) diffView.hidden = true
+    })
+  }
+
+  if (diffTab) {
+    diffTab.addEventListener('click', () => {
+      isDiffMode = true
+      diffTab.classList.add('rv-tab--active')
+      diffTab.setAttribute('aria-selected', 'true')
+      editTab.classList.remove('rv-tab--active')
+      editTab.setAttribute('aria-selected', 'false')
+      if (editor) editor.hidden = true
+      if (diffView) {
+        diffView.hidden = false
+        diffView.innerHTML = renderDiffHtml(originalText, workingText)
+      }
+    })
+  }
+
+  // ── Editor input ─────────────────────────────────────────────────
+  if (editor) {
+    editor.addEventListener('input', () => {
+      workingText = editor.value
+      updateStatus()
+      scheduleAutoSave()
+    })
+  }
+
+  // ── Chat input enable/disable send btn ───────────────────────────
+  if (chatInput && chatSendBtn) {
+    chatInput.addEventListener('input', () => {
+      chatSendBtn.disabled = !chatInput.value.trim()
+    })
+    chatInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault()
+        if (!chatSendBtn.disabled) chatForm?.requestSubmit()
+      }
+    })
+  }
+
+  // ── Append a message to the chat ─────────────────────────────────
+  function appendMessage(role, content, suggestedText) {
+    if (!chatMessages) return
+    const emptyEl = chatMessages.querySelector('.rv-chat-empty')
+    if (emptyEl) emptyEl.remove()
+
+    const div = document.createElement('div')
+    div.className = `rv-msg rv-msg--${role}`
+
+    let inner = `<div class="rv-msg__bubble"><p class="rv-msg__text">${escHtml(content)}</p>`
+
+    if (suggestedText) {
+      const diffHtml = renderDiffHtml(workingText, suggestedText)
+      inner += `
+        <div class="rv-msg__suggestion">
+          <details class="rv-diff-details">
+            <summary class="rv-diff-toggle">Show diff</summary>
+            <div class="rv-diff-inline">${diffHtml}</div>
+          </details>
+          <div class="rv-msg__actions">
+            <button class="rv-btn-accent rv-apply-btn" data-suggested="${escHtml(suggestedText)}">Apply suggestion</button>
+            <button class="rv-btn-ghost rv-decline-btn">Dismiss</button>
+          </div>
+        </div>`
+    }
+
+    inner += '</div>'
+    div.innerHTML = inner
+    chatMessages.appendChild(div)
+    chatMessages.scrollTop = chatMessages.scrollHeight
+
+    if (suggestedText) {
+      div.querySelector('.rv-apply-btn')?.addEventListener('click', (e) => {
+        const suggested = e.currentTarget.getAttribute('data-suggested')
+        if (suggested) applySuggestion(suggested, div)
+      })
+      div.querySelector('.rv-decline-btn')?.addEventListener('click', () => {
+        div.querySelector('.rv-msg__suggestion')?.remove()
+      })
+    }
+  }
+
+  function applySuggestion(suggested, msgDiv) {
+    workingText = suggested
+    if (editor) editor.value = suggested
+    msgDiv?.querySelector('.rv-msg__suggestion')?.remove()
+    updateStatus()
+    scheduleAutoSave()
+  }
+
+  // ── Wire existing suggestion buttons from SSR ────────────────────
+  document.querySelectorAll('.rv-apply-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      const suggested = e.currentTarget.getAttribute('data-suggested')
+      const msgDiv = e.currentTarget.closest('.rv-msg')
+      if (suggested) applySuggestion(suggested, msgDiv)
+    })
+  })
+  document.querySelectorAll('.rv-decline-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.currentTarget.closest('.rv-msg__suggestion')?.remove()
+    })
+  })
+
+  // ── Chat form submit ─────────────────────────────────────────────
+  if (chatForm) {
+    chatForm.addEventListener('submit', async (e) => {
+      e.preventDefault()
+      const message = chatInput?.value.trim()
+      if (!message) return
+
+      chatInput.value = ''
+      chatSendBtn.disabled = true
+      appendMessage('user', message, null)
+
+      // Thinking indicator
+      const thinkingDiv = document.createElement('div')
+      thinkingDiv.className = 'rv-msg rv-msg--assistant'
+      thinkingDiv.innerHTML = '<div class="rv-msg__bubble"><p class="rv-msg__text" style="color:var(--color-text-muted)">Thinking…</p></div>'
+      chatMessages.appendChild(thinkingDiv)
+      chatMessages.scrollTop = chatMessages.scrollHeight
+
+      if (chatHint) chatHint.textContent = 'AI is working…'
+
+      try {
+        const res = await fetch(`${apiUrl}/api/review/${token}/chat`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message, currentText: workingText }),
+        })
+        const data = await res.json()
+        thinkingDiv.remove()
+        appendMessage('assistant', data.content, data.suggestedText)
+      } catch {
+        thinkingDiv.remove()
+        appendMessage('assistant', 'Network error. Please try again.', null)
+      } finally {
+        if (chatHint) chatHint.textContent = ''
+      }
+    })
+  }
+
+  // ── Submit panel ─────────────────────────────────────────────────
+  if (sendBackBtn) {
+    sendBackBtn.addEventListener('click', () => {
+      const stats = getDiffStats(originalText, workingText)
+      if (submitDiffSummary) {
+        if (workingText === originalText) {
+          submitDiffSummary.textContent = 'No changes detected. You can still send a message to the sender.'
+        } else {
+          submitDiffSummary.textContent = `${stats.added} word${stats.added !== 1 ? 's' : ''} added · ${stats.removed} word${stats.removed !== 1 ? 's' : ''} removed from the original.`
+        }
+      }
+      if (submitPanel) submitPanel.hidden = false
+    })
+  }
+
+  if (cancelSubmitBtn) {
+    cancelSubmitBtn.addEventListener('click', () => {
+      if (submitPanel) submitPanel.hidden = true
+    })
+  }
+
+  if (confirmSubmitBtn) {
+    confirmSubmitBtn.addEventListener('click', async () => {
+      if (isSubmitting) return
+      isSubmitting = true
+      confirmSubmitBtn.disabled = true
+      confirmSubmitBtn.textContent = 'Sending…'
+      if (submitError) submitError.textContent = ''
+
+      try {
+        const res = await fetch(`${apiUrl}/api/review/${token}/submit`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            text: workingText,
+            message: submitMessage?.value.trim() || null,
+          }),
+        })
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}))
+          throw new Error(err.error ?? 'Failed to submit')
+        }
+        // Show success
+        if (submitPanel) submitPanel.hidden = true
+        if (rvSuccess) rvSuccess.hidden = false
+        if (rvSuccessBody && sessionData?.contractTitle) {
+          rvSuccessBody.textContent = `Your proposed changes for "${sessionData.contractTitle}" have been sent back to the sender.`
+        }
+      } catch (err) {
+        if (submitError) submitError.textContent = err.message ?? 'Something went wrong.'
+        confirmSubmitBtn.disabled = false
+        confirmSubmitBtn.textContent = 'Send changes'
+        isSubmitting = false
+      }
+    })
+  }
+
+  // ── Load diff library and render SSR suggestions ─────────────────
+  const script = document.createElement('script')
+  script.src = 'https://cdn.jsdelivr.net/npm/diff@5.2.0/dist/diff.min.js'
+  script.onload = () => {
+    DiffLib = window.Diff
+    updateStatus()
+    // Render diffs for any SSR-rendered suggestion messages
+    document.querySelectorAll('.rv-diff-inline[data-suggested]').forEach(el => {
+      const suggested = el.getAttribute('data-suggested')
+      if (suggested) el.innerHTML = renderDiffHtml(workingText, suggested)
+    })
+  }
+  document.head.appendChild(script)
+</script>

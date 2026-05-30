@@ -1,0 +1,134 @@
+---
+/**
+ * AppLayout — Shared HTML shell for all authenticated pages.
+ *
+ * Props:
+ *   title   — page <title> text (required)
+ *   user    — user object from Better Auth session (optional; pass null for
+ *             public pages like sign/[token].astro that don't require auth)
+ *   apiUrl  — PUBLIC_API_URL, forwarded to header's sign-out script
+ *             (optional; header sign-out is hidden when user is null)
+ */
+import '../styles/global.css'
+
+interface Props {
+  title: string
+  user?: { name?: string; email?: string } | null
+  apiUrl?: string
+}
+
+const { title, user = null, apiUrl = '' } = Astro.props
+---
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{title}</title>
+  <!-- Inter font — system fallback guaranteed by font-family stack in global.css -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap"
+    rel="stylesheet"
+  />
+</head>
+<body>
+  {user && (
+    <header class="app-header">
+      <a href="/dashboard" class="app-header__wordmark" aria-label="Genie AI — back to dashboard">
+        <span class="app-header__mark" aria-hidden="true">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M12 2 L20 7 V17 L12 22 L4 17 V7 Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" fill="none" />
+            <path d="M12 7 V12 L15.5 14" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+        </span>
+        <span>Genie AI</span>
+      </a>
+      <div class="app-header__actions">
+        <span class="app-header__username">{user.name ?? user.email}</span>
+        <button id="signout-btn" class="btn-ghost app-header__signout">Sign out</button>
+      </div>
+    </header>
+  )}
+
+  <slot />
+
+  {user && (
+    <script define:vars={{ apiUrl }}>
+      const btn = document.getElementById('signout-btn');
+      if (btn) {
+        btn.addEventListener('click', async () => {
+          btn.disabled = true;
+          btn.textContent = 'Signing out…';
+          try {
+            await fetch(`${apiUrl}/api/auth/sign-out`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: '{}',
+              credentials: 'include',
+            });
+          } catch (_) {
+            // best-effort — navigate away regardless
+          }
+          window.location.href = '/';
+        });
+      }
+    </script>
+  )}
+</body>
+</html>
+
+<style>
+  /* ---------------------------------------------------------------------------
+     App Header
+     White bar, bottom border, Genie AI wordmark on the left, user + sign-out
+     on the right.
+     --------------------------------------------------------------------------- */
+  .app-header {
+    background: var(--color-bg-white);
+    border-bottom: 1px solid var(--color-border-default);
+    padding: 0.875rem 2rem;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+  }
+
+  .app-header__wordmark {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.55rem;
+    font-size: 1.25rem;
+    font-weight: var(--font-weight-bold);
+    color: var(--color-brand-deep);
+    text-decoration: none;
+    letter-spacing: -0.01em;
+  }
+
+  .app-header__mark {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--color-accent);
+  }
+
+  .app-header__actions {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+  }
+
+  .app-header__username {
+    font-size: 0.9rem;
+    color: var(--color-text-muted);
+    font-weight: var(--font-weight-regular);
+  }
+
+  .app-header__signout {
+    font-size: 0.875rem;
+    padding: 0.375rem 0.75rem;
+  }
+</style>
