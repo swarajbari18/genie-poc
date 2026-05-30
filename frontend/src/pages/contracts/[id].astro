@@ -141,10 +141,12 @@ addSuggestedPerson({
   email: user?.email || '',
   role: 'creator',
 })
+// A3: use identity email (real Google address) over relay address for display + signer defaults
+const counterpartyEmail = contract.recipientIdentityEmail ?? contract.recipientEmail ?? ''
 addSuggestedPerson({
   label: 'Counterparty',
-  name: contract.recipientName || contract.recipientEmail || '',
-  email: contract.recipientEmail || '',
+  name: contract.recipientName || counterpartyEmail,
+  email: counterpartyEmail,
   role: 'counterparty',
 })
 contacts.forEach((contact) => {
@@ -240,16 +242,16 @@ const userInitial = firstInitial(user?.name, user?.email)
               <span class="badge badge-warning received-badge">RECEIVED</span>
             )}
           </h1>
-          {(contract.recipientName || contract.recipientEmail) && (
+          {(contract.recipientName || counterpartyEmail) && (
             <p class="page-header__counter">
               {contract.recipientName ? (
                 <>
                   <span class="page-header__counter-name">{contract.recipientName}</span>
-                  {contract.recipientEmail && <span class="page-header__counter-dot"> · </span>}
-                  {contract.recipientEmail && <span class="page-header__counter-email">{contract.recipientEmail}</span>}
+                  {counterpartyEmail && <span class="page-header__counter-dot"> · </span>}
+                  {counterpartyEmail && <span class="page-header__counter-email">{counterpartyEmail}</span>}
                 </>
               ) : (
-                <span class="page-header__counter-email">{contract.recipientEmail}</span>
+                <span class="page-header__counter-email">{counterpartyEmail}</span>
               )}
             </p>
           )}
@@ -335,12 +337,6 @@ const userInitial = firstInitial(user?.name, user?.email)
               <div class="meta-field">
                 <span class="meta-label">Recipient</span>
                 <span class="meta-value">{contract.recipientName}</span>
-              </div>
-            )}
-            {contract.recipientEmail && (
-              <div class="meta-field">
-                <span class="meta-label">Email</span>
-                <span class="meta-value">{contract.recipientEmail}</span>
               </div>
             )}
             {contract.storageKey && (
@@ -548,7 +544,7 @@ const userInitial = firstInitial(user?.name, user?.email)
               <div class="awaiting-card__copy">
                 <h2 class="awaiting-card__heading">Awaiting {contract.recipientName || 'a reply'}'s reply</h2>
                 <p class="awaiting-card__sub">
-                  Sent to <span class="awaiting-card__email">{contract.recipientEmail}</span>
+                  Sent to <span class="awaiting-card__email">{counterpartyEmail || contract.recipientEmail}</span>
                   {contract.sentAt && <> · {fmtDate(contract.sentAt)}</>}
                 </p>
                 <p class="card-subtext awaiting-card__hint">You'll be notified here when they respond. No action needed.</p>

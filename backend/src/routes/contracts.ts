@@ -292,6 +292,24 @@ contractsRouter.get('/:id', requireAuth, async (c) => {
   if (rows.length === 0) return c.json({ error: 'Not found' }, 404)
 
   const row = rows[0] as any
+
+  // A3: resolve relay address → real identity email so the UI never shows @mail.usetend.in
+  let recipientIdentityEmail: string | null = null
+  const MAIL_DOMAIN = process.env.MAIL_DOMAIN ?? ''
+  if (MAIL_DOMAIN && row.recipientEmail?.toLowerCase().endsWith(`@${MAIL_DOMAIN}`)) {
+    const byService = await db.query.serviceEmails.findFirst({
+      where: eq(serviceEmails.address, row.recipientEmail.toLowerCase()),
+    })
+    if (byService) {
+      const ownerRows = await db.execute(sql`
+        SELECT email FROM "user" WHERE id = ${byService.userId} LIMIT 1
+      `)
+      if (ownerRows.length > 0) {
+        recipientIdentityEmail = (ownerRows[0] as { email: string }).email
+      }
+    }
+  }
+
   const contract = {
     id: row.id,
     userId: row.userId,
@@ -313,6 +331,7 @@ contractsRouter.get('/:id', requireAuth, async (c) => {
     aiAnalysis: row.aiAnalysis,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
+    recipientIdentityEmail,
   }
 
   let documentUrl: string | null = null
