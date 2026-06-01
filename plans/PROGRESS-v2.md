@@ -75,5 +75,31 @@
 
 ## Next: A3 — Identity-email resolution + signer defaults + contact picker
 
+---
+
+## 2026-06-01 — B6: Contract detail reduction + component split ✓
+
+**Commit:** `0ccd56c`
+
+**Component extraction (user approved split):**
+- `ContractDocViewer.astro` — document viewer panel + tab/editor JS
+- `ContractSigningWizard.astro` — confirm-style signing form + signer management JS
+- `ContractThread.astro` — activity thread + reply composer JS
+- `[id].astro` reduced from 3541 → ~900 lines (HTML+CSS+JS)
+- `<style>` changed to `<style is:global>` so extracted components inherit page CSS
+
+**B6 UI changes applied:**
+- **Cut** metadata card (CONTRACT / RECIPIENT / ORIGINAL PDF labels) — duplicated the header
+- **Cut** Review/Signature toggle from draft send form and signing form
+- **Cut** "Contract Under Review. The counterparty's reply is in the thread." status ribbon
+- **Signing wizard → confirm-style:** pre-filled summary ("Requesting signatures from X and Y"), pencil icon (accent colour) on the right to toggle edit mode, role dropdown removed (roles inferred: index 0 = creator, rest = counterparty), note field removed, warning notice removed
+- **Edit signers mode:** all signer cards show × when 2+ present (first signer no longer locked); edit-actions row shows `[+]` icon box left + `[Done]` right on same line
+- **nextAction banner → minimal hint:** replaced colored card with a one-line text hint + inline CTA link; `executed` state removed (toolbar download button is sufficient)
+- **Thread boilerplate stripped:** "— Sent via Genie AI", "Reply to this email…" lines removed at SSR time
+- **Thread review links → buttons:** `/review/TOKEN` and `/sign/TOKEN` URLs rendered as "Review document" / "Sign document" anchor buttons
+- **Thread inbound sender:** relay address (`@mail.usetend.in`) resolved to `contract.recipientName` via `counterpartyName` prop
+
+**Verified:** User confirmed visually — document viewer visible, metadata card gone, signing confirm card functional with pencil icon, thread boilerplate stripped, hint line visible instead of colored banner.
+
 
 
