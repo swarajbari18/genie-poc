@@ -123,6 +123,36 @@
 
 ---
 
+## 2026-06-01 — E-B4/B5: Create one-intent-box + unified front door (design review in progress)
+
+**Status:** Implemented. Awaiting user design-review approval before commit.
+
+**Backend changes:**
+- `backend/src/routes/generate.ts` — added `POST /api/generate/extract`: one fast Gemini call that parses freeform lawyer intent into `{ title, contractType, partiesA: string[], partiesB: string[] }`. Returns arrays, normalises single-value responses. Uses `gemini-2.5-flash-lite`, 10s timeout.
+- `POST /api/generate` — updated to accept `partiesA`/`partiesB` arrays (joins to strings) alongside legacy `partyA`/`partyB`. Contract generation prompt now uses "Party A (first part)" / "Party B (second part)" language.
+
+**Frontend changes (`frontend/src/pages/create.astro`):**
+- Removed all structured input fields (title, contract type, Party A/B dropdowns) — lawyers do not use "Party A / Party B", those are developer placeholders
+- Single freeform textarea as the primary and only input, with instructional placeholder: *"Describe the contract — type, parties and their roles, governing law, and any key terms."*
+- Two optional secondary fields: "Contract name" (auto-derived from extraction if blank) and "Add to project"
+- Path chooser at top: "Generate with AI" (active pill) and "Upload a PDF" (ghost button)
+- One-phase flow: click Generate → extraction runs silently behind the progress overlay → generate runs → contract opens. No two-step UI exposed to the user.
+- Extraction fallback: if extract fails, title derived from first line of intent; default contractType NDA; partyA = signed-in user name
+
+**Global CSS fixes (discovered during E-B4/B5):**
+- `global.css` — added canonical `.form-input` definition (was missing; only existed in `[id].astro`'s `is:global` block, causing raw browser-default inputs on all other pages — wrong font, sharp corners, too shallow height)
+- `--radius-input` bumped from `6px` to `8px` — 6px is visually indistinguishable from a rectangle at normal viewing distance
+- `select.form-input` — explicit `border-radius`, `appearance: none`, `-moz-appearance: none` to ensure consistent rendering across browsers
+
+**Product direction corrections (from user during this session):**
+- "Party A / Party B" are developer terms, not legal terms. Lawyers use role-based names (Disclosing Party, Client, Employer, Licensor, etc.) — these should never appear in the lawyer-facing UI
+- The Advanced section (structured fields) was removed entirely — lawyers write intent in natural language, the system extracts structure silently
+- Placeholder text must be instructional (tell the lawyer what to include) not an example prompt
+
+**Pending:** Design-review checkpoint — user to approve the create page layout before this is committed.
+
+---
+
 ## ⚠️ CRITICAL PRODUCT FINDING — A6: AI Diff feature seam is broken
 
 **Discovered:** 2026-06-01, during E-B3 investigation of the Vite `react-diff-viewer-continued` warning.
