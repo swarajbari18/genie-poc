@@ -1,0 +1,224 @@
+---
+interface Props {
+  initialSignerRows: Array<{ name: string; email: string; role: string; label?: string; key?: string }>
+  apiUrl: string
+  contractId: string
+}
+
+const { initialSignerRows, apiUrl, contractId } = Astro.props
+---
+
+<div id="signingSection" style="scroll-margin-top:1rem">
+  <section class="sign-confirm card">
+    <div class="sign-confirm__head">
+      <h2 class="send-card__heading">Send for signature</h2>
+    </div>
+
+    <form id="signForm">
+      {/* Hidden signer inputs — always in DOM so form submit reads them */}
+      <div id="signerRows" class="signer-cards sign-confirm__edit-rows" hidden>
+        {initialSignerRows.map((person) => (
+          <div class="signer-card">
+            <div class="signer-card__row">
+              <input
+                type="text"
+                name="signerName[]"
+                placeholder="Name"
+                class="form-input"
+                value={person.name}
+                required
+              />
+              <input
+                type="email"
+                name="signerEmail[]"
+                placeholder="Email"
+                class="form-input"
+                value={person.email}
+                required
+              />
+              <button type="button" class="signer-card__remove" aria-label="Remove signer" hidden>×</button>
+            </div>
+          </div>
+        ))}
+      </div>
+      <div id="signEditActions" class="sign-confirm__edit-actions" hidden>
+        <button type="button" id="addSignerBtn" class="sign-confirm__add-btn" title="Add another signer">+</button>
+        <button type="button" id="signDoneEditBtn" class="btn-ghost btn-sm">Done</button>
+      </div>
+
+      {/* Confirm summary — visible by default */}
+      <div id="signConfirmView" class="sign-confirm__confirm-view">
+        <p id="signConfirmSummary" class="sign-confirm__summary">
+          {/* Populated by JS on load */}
+        </p>
+        <button type="button" id="signEditToggle" class="sign-confirm__edit-link" aria-label="Edit signers" title="Edit signers">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
+      </div>
+
+      <p id="signError" class="error-banner"></p>
+
+      <div class="wizard-actions">
+        <button type="submit" id="signSubmitBtn" class="btn-primary btn-lg">
+          Send for signature
+        </button>
+      </div>
+    </form>
+  </section>
+</div>
+
+<script define:vars={{ apiUrl, contractId }}>
+  ;(function initSigningConfirm() {
+    const signerContainer = document.getElementById('signerRows')
+    const editActionsDiv  = document.getElementById('signEditActions')
+    const addSignerBtn    = document.getElementById('addSignerBtn')
+    const editToggleBtn   = document.getElementById('signEditToggle')
+    const confirmView     = document.getElementById('signConfirmView')
+    const confirmSummary  = document.getElementById('signConfirmSummary')
+
+    function getSignerNames() {
+      return Array.from(document.getElementsByName('signerName[]')).map(i => i.value.trim())
+    }
+    function getSignerEmails() {
+      return Array.from(document.getElementsByName('signerEmail[]')).map(i => i.value.trim())
+    }
+
+    function buildSummary() {
+      const names  = getSignerNames()
+      const emails = getSignerEmails()
+      const parts  = names.map((n, i) => (n ? `${n} (${emails[i]})` : emails[i])).filter(Boolean)
+      if (!confirmSummary) return
+      confirmSummary.textContent =
+        parts.length === 0
+          ? 'No signers set.'
+          : 'Requesting signatures from: ' + parts.join(' and ') + '.'
+    }
+
+    function setEditMode(editing) {
+      if (!signerContainer) return
+      if (editing) {
+        signerContainer.hidden          = false
+        if (editActionsDiv) editActionsDiv.hidden = false
+        if (confirmView)    confirmView.hidden    = true
+        editToggleBtn?.setAttribute('data-editing', 'true')
+      } else {
+        signerContainer.hidden          = true
+        if (editActionsDiv) editActionsDiv.hidden = true
+        if (confirmView)    confirmView.hidden    = false
+        buildSummary()
+        editToggleBtn?.removeAttribute('data-editing')
+      }
+    }
+
+    // Init: start in confirm mode, populate summary from pre-filled inputs
+    buildSummary()
+    setEditMode(false)
+
+    editToggleBtn?.addEventListener('click', () => {
+      const editing = editToggleBtn.hasAttribute('data-editing')
+      setEditMode(!editing)
+    })
+
+    document.getElementById('signDoneEditBtn')?.addEventListener('click', () => setEditMode(false))
+
+    // ── Signer row management ──────────────────────────────────────────────
+
+    function refreshRemovers() {
+      if (!signerContainer) return
+      const cards = signerContainer.querySelectorAll('.signer-card')
+      cards.forEach((card) => {
+        const btn = card.querySelector('.signer-card__remove')
+        if (btn) btn.hidden = cards.length <= 1
+      })
+    }
+
+    function wireRemoveBtn(btn) {
+      if (!btn || btn.dataset.wired === '1') return
+      btn.dataset.wired = '1'
+      btn.addEventListener('click', () => {
+        btn.closest('.signer-card')?.remove()
+        refreshRemovers()
+        if (addSignerBtn) addSignerBtn.hidden = false
+      })
+    }
+
+    signerContainer?.querySelectorAll('.signer-card__remove').forEach(wireRemoveBtn)
+    refreshRemovers()
+
+    addSignerBtn?.addEventListener('click', () => {
+      if (!signerContainer || signerContainer.children.length >= 4) return
+      const clone = signerContainer.children[0].cloneNode(true)
+      clone.querySelectorAll('input').forEach(i => { i.value = '' })
+      const removeBtn = clone.querySelector('.signer-card__remove')
+      if (removeBtn) { removeBtn.removeAttribute('data-wired'); wireRemoveBtn(removeBtn) }
+      signerContainer.appendChild(clone)
+      refreshRemovers()
+      if (signerContainer.children.length >= 4) addSignerBtn.hidden = true
+      clone.querySelector('input[name="signerEmail[]"]')?.focus()
+    })
+
+    // ── Form submit ───────────────────────────────────────────────────────
+
+    const signForm = document.getElementById('signForm')
+    if (signForm) {
+      signForm.addEventListener('submit', async (e) => {
+        e.preventDefault()
+        const btn       = document.getElementById('signSubmitBtn')
+        const signError = document.getElementById('signError')
+        if (btn) { btn.disabled = true; btn.textContent = 'Preparing…' }
+        if (signError) { signError.textContent = ''; signError.style.display = 'none' }
+
+        const names   = getSignerNames()
+        const emails  = getSignerEmails()
+        const message = ''
+
+        // Validate
+        for (let i = 0; i < emails.length; i++) {
+          if (!names[i] || !emails[i]) {
+            if (signError) { signError.textContent = "Please fill in every signer’s name and email."; signError.style.display = 'block' }
+            if (btn) { btn.disabled = false; btn.textContent = 'Send for signature' }
+            return
+          }
+          if (!/.+@.+\..+/.test(emails[i])) {
+            if (signError) { signError.textContent = `"${emails[i]}" doesn't look like a valid email.`; signError.style.display = 'block' }
+            if (btn) { btn.disabled = false; btn.textContent = 'Send for signature' }
+            return
+          }
+        }
+
+        // Infer roles: first signer = creator (the owner), rest = counterparty
+        const signers = names.map((name, i) => ({
+          name,
+          email: emails[i],
+          role: i === 0 ? 'creator' : 'counterparty',
+          order: i + 1,
+        }))
+
+        const res = await fetch(`${apiUrl}/api/contracts/${contractId}/send-for-signature`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ signers, message }),
+          credentials: 'include',
+        })
+
+        if (res.ok) {
+          const { sendUrl } = await res.json()
+          if (!sendUrl) {
+            if (signError) { signError.textContent = 'Server did not return a prepare URL.'; signError.style.display = 'block' }
+            if (btn) { btn.disabled = false; btn.textContent = 'Send for signature' }
+            return
+          }
+          window.dispatchEvent(new CustomEvent('genie:open-prepare-iframe', { detail: { sendUrl } }))
+          if (btn) { btn.disabled = false; btn.textContent = 'Send for signature' }
+        } else {
+          const err = await res.json().catch(() => ({}))
+          if (signError) { signError.textContent = `Failed: ${err.error || 'Unknown error'}`; signError.style.display = 'block' }
+          if (btn) { btn.disabled = false; btn.textContent = 'Send for signature' }
+        }
+      })
+    }
+  })()
+</script>

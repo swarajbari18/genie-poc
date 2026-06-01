@@ -1,6 +1,9 @@
 ---
 import AppLayout from '../../layouts/AppLayout.astro'
 import DiffViewer from '../../components/DiffViewer.tsx'
+import ContractDocViewer from '../../components/contracts/ContractDocViewer.astro'
+import ContractSigningWizard from '../../components/contracts/ContractSigningWizard.astro'
+import ContractThread from '../../components/contracts/ContractThread.astro'
 
 const { id } = Astro.params
 const apiUrl = import.meta.env.PUBLIC_API_URL || 'http://localhost:8080'
@@ -296,151 +299,45 @@ const userInitial = firstInitial(user?.name, user?.email)
       {/* ── LEFT COLUMN — Document / Actions ────────────────────────────────── */}
       <div class="col-left">
 
-        {/* ── Next-action banner ────────────────────────────────────────────── */}
-        {nextAction !== 'none' && (
-          <div class={`next-action-banner next-action-banner--${nextAction}`}>
-            <span class="next-action-banner__text">
-              {nextAction === 'awaiting_your_review' && `It's your turn — review the proposed changes.`}
-              {nextAction === 'awaiting_their_reply' && `Sent. Waiting on ${counterpartyFirstName} to reply.`}
-              {nextAction === 'ready_to_send_signature' && `Review complete. Ready to send for signature.`}
-              {nextAction === 'awaiting_you_sign' && `It's your turn — sign to execute.`}
+        {/* ── Next-action hint — one quiet line, no card ───────────────────── */}
+        {nextAction !== 'none' && nextAction !== 'executed' && (
+          <div class={`next-action-hint next-action-hint--${nextAction === 'awaiting_their_reply' || nextAction === 'awaiting_them_sign' ? 'muted' : 'active'}`}>
+            <span class="next-action-hint__text">
+              {nextAction === 'awaiting_your_review' && `Your turn — review the proposed changes.`}
+              {nextAction === 'awaiting_their_reply' && `Waiting on ${counterpartyFirstName} to reply.`}
+              {nextAction === 'ready_to_send_signature' && `Review complete — ready to send for signature.`}
+              {nextAction === 'awaiting_you_sign' && `Your turn — sign to execute.`}
               {nextAction === 'awaiting_them_sign' && `Waiting on ${remainingSigners === 1 ? '1 person' : `${remainingSigners} people`} to sign.`}
-              {nextAction === 'executed' && `Executed. All parties have signed.`}
-              {nextAction === 'declined' && `${counterpartyFirstName} declined. You can revise and resend.`}
+              {nextAction === 'declined' && `${counterpartyFirstName} declined.`}
             </span>
             {nextAction === 'awaiting_your_review' && (
-              <a href="#threadSection" class="next-action-banner__cta">Review changes</a>
+              <a href="#threadSection" class="next-action-hint__cta">Review →</a>
             )}
             {nextAction === 'ready_to_send_signature' && (
-              <a href="#signingSection" class="next-action-banner__cta">Send for signature</a>
+              <a href="#signingSection" class="next-action-hint__cta">Sign →</a>
             )}
             {nextAction === 'awaiting_you_sign' && (
-              <button id="nextActionSignBtn" class="next-action-banner__cta">Sign now</button>
-            )}
-            {nextAction === 'executed' && (
-              <button id="nextActionDownloadBtn" class="next-action-banner__cta">Download PDF</button>
+              <button id="nextActionSignBtn" class="next-action-hint__cta">Sign now →</button>
             )}
             {nextAction === 'declined' && (
-              <a href="#replySection" class="next-action-banner__cta">Reply</a>
+              <a href="#replySection" class="next-action-hint__cta">Reply →</a>
             )}
           </div>
         )}
 
-        {/* Document metadata card */}
-        <section class="card meta-card">
-          <div class="meta-card__inner">
-            <div class="meta-field">
-              <span class="meta-label">Contract</span>
-              <span class="meta-value">{contract.title}</span>
-            </div>
-            {contract.recipientName && (
-              <div class="meta-field">
-                <span class="meta-label">Recipient</span>
-                <span class="meta-value">{contract.recipientName}</span>
-              </div>
-            )}
-            {contract.storageKey && (
-              <div class="meta-field">
-                <span class="meta-label">Original PDF</span>
-                <a href="#" class="attachment meta-attachment">
-                  📎 Download Original
-                </a>
-              </div>
-            )}
-          </div>
-        </section>
-
         {/* ── Document viewer — always visible ─────────────────────── */}
-        <section class="doc-viewer card" id="docViewer">
-          <div class="doc-viewer__head">
-            <div class="doc-viewer__tabs" role="tablist">
-              <button class="doc-viewer__tab doc-viewer__tab--active" id="docTabPdf" role="tab" aria-selected="true">
-                Document
-              </button>
-              {showEditTab && (
-                <button class="doc-viewer__tab" id="docTabEdit" role="tab" aria-selected="false">
-                  Edit
-                </button>
-              )}
-              {showVersionDiff && (
-                <button class="doc-viewer__tab" id="docTabChanges" role="tab" aria-selected="false">
-                  v{latestCounterpartyVersion!.versionNumber} · Their changes
-                </button>
-              )}
-            </div>
-            {showCompleted && contract.signedStorageKey ? (
-              <button id="downloadSignedBtn" class="doc-viewer__download doc-viewer__download--signed" title="Download executed PDF">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                  <path d="M12 3v13m0 0-4-4m4 4 4-4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                  <path d="M3 20h18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-                </svg>
-                Download executed
-              </button>
-            ) : (
-              <a
-                href="#"
-                class="doc-viewer__download attachment"
-                data-key={contract.storageKey}
-                title="Download PDF"
-              >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                  <path d="M12 3v13m0 0-4-4m4 4 4-4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                  <path d="M3 20h18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-                </svg>
-                Download
-              </a>
-            )}
-          </div>
-
-          {/* PDF iframe — src baked at SSR time; no client-side fetch needed */}
-          <div class="doc-viewer__body" id="docBodyPdf" data-document-url={documentUrl ?? ''}>
-            <div class="doc-viewer__loading" id="docPdfLoading">
-              <div class="doc-viewer__spinner"></div>
-              <span>Loading document…</span>
-            </div>
-            <iframe
-              id="docPdfFrame"
-              class="doc-viewer__iframe"
-              title="Contract document"
-              hidden
-            ></iframe>
-            <div class="doc-viewer__error" id="docPdfError" hidden>
-              <p>Could not load the PDF preview.</p>
-              <a href="#" class="attachment" data-key={contract.storageKey}>📎 Download PDF instead</a>
-            </div>
-          </div>
-
-          {/* HTML editor — draft AI-generated contracts only */}
-          {showEditTab && (
-            <div class="doc-viewer__body doc-viewer__body--editor" id="docBodyEdit" hidden>
-              <div class="doc-editor">
-                <div class="doc-editor__toolbar">
-                  <span id="editSaveStatus" class="edit-save-status"></span>
-                  <button type="button" id="editSaveBtn" class="btn-primary btn-sm">Save changes</button>
-                </div>
-                <div
-                  id="docEditorContent"
-                  class="doc-editor__content"
-                  contenteditable="true"
-                  spellcheck="false"
-                ></div>
-              </div>
-            </div>
-          )}
-
-          {/* Counterparty diff */}
-          {showVersionDiff && (
-            <div class="doc-viewer__body" id="docBodyChanges" hidden>
-              <div class="doc-diff-wrap">
-                <DiffViewer
-                  oldText={ownerVersion!.text}
-                  newText={latestCounterpartyVersion!.text}
-                  client:visible
-                />
-              </div>
-            </div>
-          )}
-        </section>
+        <ContractDocViewer
+          documentUrl={documentUrl}
+          contract={contract}
+          showEditTab={showEditTab}
+          v1HtmlContent={v1HtmlContent}
+          showVersionDiff={showVersionDiff}
+          ownerVersion={ownerVersion}
+          latestCounterpartyVersion={latestCounterpartyVersion}
+          showCompleted={showCompleted}
+          apiUrl={apiUrl}
+          contractId={id!}
+        />
 
         {/* DRAFT — unified Send surface */}
         {showSendForm && (
@@ -467,11 +364,6 @@ const userInitial = firstInitial(user?.name, user?.email)
                 <h2 class="send-card__heading">Send</h2>
                 <button type="button" id="sendCollapseBtn" class="send-card__collapse" aria-label="Collapse">Collapse ↑</button>
               </div>
-              <div class="send-mode" aria-label="Send mode">
-                <button type="button" class="send-mode__option send-mode__option--active">Review</button>
-                <button type="button" class="send-mode__option" disabled>Signature</button>
-              </div>
-              <p class="send-mode__hint">Signature opens after review, once the document is ready.</p>
               <form id="sendForm" class="send-form">
                 <label class="form-label">To</label>
 
@@ -616,11 +508,7 @@ const userInitial = firstInitial(user?.name, user?.email)
                   <span class="diff-note">Diff is computed from extracted text; formatting may vary.</span>
                 </div>
               </section>
-            ) : showVersionDiff ? null : (
-              <section class="card status-card status-card--success">
-                <strong>Contract Under Review.</strong> The counterparty's reply is in the thread.
-              </section>
-            )}
+            ) : null}
 
             {/* Version diff — from review workspace */}
             {showVersionDiff && (
@@ -655,116 +543,13 @@ const userInitial = firstInitial(user?.name, user?.email)
               </section>
             )}
 
-            {/* Unified Send surface — signature mode */}
+            {/* Signing confirm card */}
             {showSigningForm && (
-              <div id="signingSection" style="scroll-margin-top:1rem">
-              <section class="send-card send-card--ready card" id="signatureSendCard" data-expanded="true">
-                <div class="send-card__expanded">
-                  <div class="send-card__expanded-head">
-                    <div>
-                      <h2 class="send-card__heading">Send</h2>
-                      <p class="send-card__body">The review step is complete. Prepare the signature request when everyone is aligned.</p>
-                    </div>
-                  </div>
-                  <div class="send-mode" aria-label="Send mode">
-                    <button type="button" class="send-mode__option" disabled>Review</button>
-                    <button type="button" class="send-mode__option send-mode__option--active">Signature</button>
-                  </div>
-                  <form id="signForm">
-                    {/* Step 1 — Who needs to sign? */}
-                    <div id="signing-step-1" class="wizard-step">
-                      <div class="wizard-head">
-                        <span class="wizard-pip wizard-pip--active">1</span>
-                        <span class="wizard-pip">2</span>
-                        <span class="wizard-step-label">Who needs to sign?</span>
-                      </div>
-
-                      <div id="signerRows" class="signer-cards">
-                        {initialSignerRows.map((person) => (
-                          <div class="signer-card">
-                            <div class="signer-card__row">
-                              <input type="text" name="signerName[]" placeholder="Name"
-                                class="form-input" value={person.name} required />
-                              <input type="email" name="signerEmail[]" placeholder="Email"
-                                class="form-input" value={person.email} required />
-                            </div>
-                            <div class="signer-card__row signer-card__row--meta">
-                              <select name="signerRole[]" class="form-input signer-card__role">
-                                <option value="counterparty" selected={person.role === 'counterparty'}>Counterparty</option>
-                                <option value="creator" selected={person.role === 'creator'}>Creator</option>
-                                <option value="other" selected={person.role === 'other'}>Other</option>
-                              </select>
-                              <button type="button" class="signer-card__remove" aria-label="Remove signer" hidden>×</button>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                      {signingSuggestions.length > 0 && (
-                        <div class="people-strip people-strip--signers" aria-label="Suggested signers">
-                          {signingSuggestions.map((person) => (
-                            <button
-                              type="button"
-                              class="person-chip"
-                              data-add-signer
-                              data-person-name={person.name}
-                              data-person-email={person.email}
-                              data-person-role={person.role}
-                            >
-                              <span class="person-chip__label">{person.label}</span>
-                              <span class="person-chip__email">{person.email}</span>
-                            </button>
-                          ))}
-                        </div>
-                      )}
-                      <button type="button" id="addSignerBtn" class="add-signer-btn">
-                        + Add another signer
-                      </button>
-
-                      <p id="signStep1Error" class="error-banner"></p>
-                      <div class="wizard-actions">
-                        <button type="button" id="signNextBtn" class="btn-primary">Continue</button>
-                      </div>
-                    </div>
-
-                    {/* Step 2 — Confirm */}
-                    <div id="signing-step-2" class="wizard-step" hidden>
-                      <div class="wizard-head">
-                        <span class="wizard-pip wizard-pip--done">1</span>
-                        <span class="wizard-pip wizard-pip--active">2</span>
-                        <span class="wizard-step-label">Confirm signing request</span>
-                      </div>
-
-                      <p class="card-subtext wizard-blurb">
-                        You're about to send this contract for legal e-signature.
-                        Dropbox Sign will email each signer with a link to review and sign the document.
-                      </p>
-
-                      <div class="wizard-summary">
-                        <span class="wizard-summary__label">Signers</span>
-                        <ul id="signersSummary" class="wizard-summary__list">
-                          {/* Populated on Next */}
-                        </ul>
-                      </div>
-
-                      <details class="wizard-note">
-                        <summary class="wizard-note__toggle">+ Add a note (optional)</summary>
-                        <textarea name="signMessage" rows="3" class="form-input wizard-note__input"
-                          placeholder="Please sign this agreement at your earliest convenience…"></textarea>
-                      </details>
-
-                      <p class="warning-notice">Once sent, the contract can no longer be edited.</p>
-
-                      <p id="signError" class="error-banner"></p>
-
-                      <div class="wizard-actions">
-                        <button type="button" id="signBackBtn" class="btn-ghost">← Back</button>
-                        <button type="submit" id="signSubmitBtn" class="btn-primary btn-lg">Prepare Signature</button>
-                      </div>
-                    </div>
-                  </form>
-                </div>
-              </section>
-              </div>
+              <ContractSigningWizard
+                initialSignerRows={initialSignerRows}
+                apiUrl={apiUrl}
+                contractId={id!}
+              />
             )}
           </>
         )}
@@ -832,124 +617,21 @@ const userInitial = firstInitial(user?.name, user?.email)
       </div>{/* /col-left */}
 
       {/* ── RIGHT COLUMN — Activity / Thread ────────────────────────────────── */}
-      <div class="col-right" id="threadSection">
-
-        <h2 class="thread-heading">Activity</h2>
-
-        {/* Thread scroll area */}
-        <div class="thread-scroll">
-          {threads.length === 0 ? (
-            <div class="thread-empty">
-              <p class="card-subtext">No activity yet. The thread will appear here once the contract is sent.</p>
-            </div>
-          ) : (
-            threads.map((t: any) => {
-              if (t.direction === 'outbound') {
-                return (
-                  <div class="thread-row thread-row--outbound">
-                    <div class="thread-stack">
-                      <div class="thread-bubble thread-bubble--outbound">
-                        {t.subject && (
-                          <div class="thread-bubble__subject">{t.subject}</div>
-                        )}
-                        <div class="thread-bubble__body">
-                          {t.body || 'Sent with attachment.'}
-                        </div>
-                        {t.attachments && Array.isArray(t.attachments) && t.attachments.length > 0 && (
-                          <div class="thread-bubble__attachments">
-                            {t.attachments.map((a: any) => (
-                              <a href="#"
-                                class="attachment-chip"
-                                data-key={a.storageKey ?? a.storage_key}>
-                                📎 {a.filename ?? 'attachment.pdf'}
-                              </a>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                      <div class="thread-stamp">You · {fmtShortDate(t.emailDate)}</div>
-                    </div>
-                    <span class="avatar avatar--outbound" aria-hidden="true">{userInitial}</span>
-                  </div>
-                )
-              } else if (t.direction === 'inbound') {
-                const senderName = t.fromName || t.fromAddress || 'Counterparty'
-                const inboundInitial = firstInitial(t.fromName, t.fromAddress)
-                return (
-                  <div class="thread-row thread-row--inbound">
-                    <span class="avatar avatar--inbound" aria-hidden="true">{inboundInitial}</span>
-                    <div class="thread-stack">
-                      <div class="thread-bubble thread-bubble--inbound">
-                        {t.subject && (
-                          <div class="thread-bubble__subject">{t.subject}</div>
-                        )}
-                        <div class="thread-bubble__body">
-                          {t.body || 'Received with attachment.'}
-                        </div>
-                        {t.attachments && Array.isArray(t.attachments) && t.attachments.length > 0 && (
-                          <div class="thread-bubble__attachments">
-                            {t.attachments.map((a: any) => (
-                              <a href="#"
-                                class="attachment-chip"
-                                data-key={a.storageKey ?? a.storage_key}>
-                                📎 {a.filename ?? 'attachment.pdf'}
-                              </a>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                      <div class="thread-stamp">{senderName} · {fmtShortDate(t.emailDate)}</div>
-                    </div>
-                  </div>
-                )
-              } else {
-                /* system */
-                return (
-                  <div class="thread-system">
-                    <span class="thread-system__body">{t.body}</span>
-                    {t.emailDate && (
-                      <span class="thread-system__date">{fmtShortDate(t.emailDate)}</span>
-                    )}
-                  </div>
-                )
-              }
-            })
-          )}
-        </div>{/* /thread-scroll */}
-
-        {/* Reply Composer — chat-style, sticky bottom */}
-        {showReplyComposer && (
-          <div class="composer" id="replySection">
-            <form id="replyForm" class="composer__form">
-              <textarea
-                id="replyText"
-                name="message"
-                rows="3"
-                class="composer__text"
-                placeholder="Write your reply…"
-                required
-              ></textarea>
-              <div class="composer__foot">
-                <label class="composer__attach" for="replyFile">
-                  <input type="file" id="replyFile" name="file" accept="application/pdf" class="composer__file-input" />
-                  <span id="replyAttachLabel" class="composer__attach-label">📎 Attach revised PDF</span>
-                </label>
-                <button type="submit" id="replyBtn" class="btn-primary composer__send" disabled>
-                  Send Reply →
-                </button>
-              </div>
-              <p id="replyError" class="error-banner"></p>
-            </form>
-          </div>
-        )}
-
-      </div>{/* /col-right */}
+      <ContractThread
+        threads={threads}
+        showReplyComposer={showReplyComposer}
+        user={user}
+        userInitial={userInitial}
+        apiUrl={apiUrl}
+        contractId={id!}
+        counterpartyName={contract.recipientName ?? undefined}
+      />
 
     </div>{/* /contract-body */}
   </main>
 </AppLayout>
 
-<style>
+<style is:global>
   /* ── Main container ────────────────────────────────────────────────────── */
   .contract-main {
     max-width: 1280px;
@@ -1123,55 +805,35 @@ const userInitial = firstInitial(user?.name, user?.email)
   }
 
   /* ── Next-action banner ────────────────────────────────────────────────── */
-  .next-action-banner {
+  /* ── Next-action hint — one compact line, no card ─────────────────────── */
+  .next-action-hint {
     display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.75rem;
-    padding: 0.625rem 0.875rem;
-    border-radius: var(--radius-card);
-    font-size: 0.83rem;
+    align-items: baseline;
+    gap: 0.5rem;
+    font-size: 0.8rem;
+    margin-bottom: 0.75rem;
+  }
+  .next-action-hint--active {
+    color: var(--color-text-primary);
     font-weight: var(--font-weight-medium);
-    border: 1px solid transparent;
-    background: var(--color-bg-subtle, #f9fafb);
-    border-color: var(--color-border-default);
+  }
+  .next-action-hint--muted {
     color: var(--color-text-secondary);
   }
-  .next-action-banner--awaiting_your_review,
-  .next-action-banner--awaiting_you_sign,
-  .next-action-banner--ready_to_send_signature {
-    background: #eff6ff;
-    border-color: #bfdbfe;
-    color: #1d4ed8;
-  }
-  .next-action-banner--executed {
-    background: #f0fdf4;
-    border-color: #bbf7d0;
-    color: #15803d;
-  }
-  .next-action-banner--declined {
-    background: #fef2f2;
-    border-color: #fecaca;
-    color: #b91c1c;
-  }
-  .next-action-banner__text {
-    flex: 1;
-  }
-  .next-action-banner__cta {
-    flex-shrink: 0;
-    font-size: 0.78rem;
-    font-weight: var(--font-weight-semibold);
-    padding: 0.25rem 0.625rem;
-    border-radius: var(--radius-pill);
-    border: 1px solid currentColor;
+  .next-action-hint__text { flex: 1; }
+  .next-action-hint__cta {
     background: none;
-    color: inherit;
+    border: none;
+    padding: 0;
+    font-size: inherit;
+    font-weight: var(--font-weight-semibold);
+    color: var(--color-accent);
     cursor: pointer;
     text-decoration: none;
     white-space: nowrap;
-    transition: opacity 0.15s;
+    flex-shrink: 0;
   }
-  .next-action-banner__cta:hover { opacity: 0.75; text-decoration: none; }
+  .next-action-hint__cta:hover { text-decoration: underline; }
 
   /* ── Two-column body ───────────────────────────────────────────────────── */
   .contract-body {
@@ -2103,8 +1765,9 @@ const userInitial = firstInitial(user?.name, user?.email)
 
   .signer-card__row {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: 1fr 1fr auto;
     gap: 0.5rem;
+    align-items: center;
   }
 
   .signer-card__row--meta {
@@ -2121,17 +1784,24 @@ const userInitial = firstInitial(user?.name, user?.email)
 
   .signer-card__remove {
     background: none;
-    border: none;
+    border: 1px solid var(--color-border-default);
     color: var(--color-text-muted);
-    font-size: 1.25rem;
+    font-size: 0.9rem;
     line-height: 1;
     cursor: pointer;
-    padding: 0.2rem 0.55rem;
+    padding: 0;
+    width: 26px;
+    height: 26px;
     border-radius: var(--radius-input);
-    transition: background 0.15s ease, color 0.15s ease;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    transition: background 0.12s ease, color 0.12s ease;
   }
   .signer-card__remove:hover {
     background: #FEE2E2;
+    border-color: #FCA5A5;
     color: #991B1B;
   }
 
@@ -2198,14 +1868,14 @@ const userInitial = firstInitial(user?.name, user?.email)
 
   .wizard-note__toggle {
     cursor: pointer;
-    color: var(--color-accent);
+    color: var(--color-text-secondary);
     font-size: 0.85rem;
-    font-weight: var(--font-weight-semibold);
+    font-weight: var(--font-weight-medium);
     list-style: none;
     padding: 0.25rem 0;
   }
   .wizard-note__toggle::-webkit-details-marker { display: none; }
-  .wizard-note__toggle:hover { text-decoration: underline; }
+  .wizard-note__toggle:hover { color: var(--color-text-primary); text-decoration: underline; }
 
   .wizard-note__input {
     margin-top: 0.5rem;
@@ -2219,6 +1889,86 @@ const userInitial = firstInitial(user?.name, user?.email)
     margin-top: 0.25rem;
   }
   .wizard-actions .btn-primary.btn-lg { width: auto; flex: 1; }
+
+  /* ── Confirm-style signing card ──────────────────────────────────────── */
+  .sign-confirm {
+    padding: 1.25rem 1.5rem;
+  }
+  .sign-confirm form {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    margin-top: 0.75rem;
+  }
+  .sign-confirm__confirm-view {
+    display: flex;
+    flex-direction: row;
+    align-items: flex-start;
+    gap: 0.5rem;
+  }
+  .sign-confirm__confirm-view .sign-confirm__summary {
+    flex: 1;
+  }
+  .sign-confirm__summary {
+    font-size: 0.9rem;
+    color: var(--color-text-secondary);
+    line-height: 1.55;
+    margin: 0;
+  }
+  .sign-confirm__edit-link {
+    background: none;
+    border: none;
+    padding: 0.25rem;
+    color: var(--color-accent);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    border-radius: var(--radius-input);
+    transition: background 0.12s;
+    align-self: flex-start;
+  }
+  .sign-confirm__edit-link:hover { background: var(--color-bg-subtle); }
+  .sign-confirm__edit-rows {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+  .sign-confirm__edit-actions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+  }
+  .sign-confirm__add-btn {
+    width: 28px;
+    height: 28px;
+    border: 1px solid var(--color-border-default);
+    border-radius: var(--radius-input);
+    background: none;
+    font-size: 1.2rem;
+    line-height: 1;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--color-accent);
+    flex-shrink: 0;
+    transition: background 0.12s;
+  }
+  .sign-confirm__add-btn:hover {
+    background: var(--color-bg-subtle);
+  }
+  /* Button fills the card width like the other send buttons */
+  .sign-confirm .wizard-actions .btn-primary.btn-lg {
+    flex: 1;
+  }
+
+  /* ── Thread review link button ─────────────────────────────────────── */
+  .thread-review-link {
+    display: inline-block;
+    margin-top: 0.5rem;
+    text-decoration: none;
+  }
 
   /* ── Signing roster ───────────────────────────────────────────────────── */
   .signer-roster {
@@ -2677,101 +2427,7 @@ const userInitial = firstInitial(user?.name, user?.email)
   }
 </style>
 
-<script define:vars={{ apiUrl, contractId: id, userInitial, v1HtmlContent, showEditTab }}>
-  // ── Document viewer ────────────────────────────────────────────────────────
-  ;(function initDocViewer() {
-    const tabPdf      = document.getElementById('docTabPdf')
-    const tabEdit     = document.getElementById('docTabEdit')
-    const tabChanges  = document.getElementById('docTabChanges')
-    const bodyPdf     = document.getElementById('docBodyPdf')
-    const bodyEdit    = document.getElementById('docBodyEdit')
-    const bodyChanges = document.getElementById('docBodyChanges')
-    const frame       = document.getElementById('docPdfFrame')
-    const loading     = document.getElementById('docPdfLoading')
-    const errEl       = document.getElementById('docPdfError')
-
-    const allTabs   = [tabPdf, tabEdit, tabChanges].filter(Boolean)
-    const allBodies = [bodyPdf, bodyEdit, bodyChanges].filter(Boolean)
-
-    function activateTab(activeTab, activeBody) {
-      allTabs.forEach(t => { t.classList.remove('doc-viewer__tab--active'); t.setAttribute('aria-selected', 'false') })
-      allBodies.forEach(b => { b.hidden = true })
-      if (activeTab)  { activeTab.classList.add('doc-viewer__tab--active'); activeTab.setAttribute('aria-selected', 'true') }
-      if (activeBody) activeBody.hidden = false
-    }
-
-    // Load PDF — URL baked at SSR time, no fetch needed
-    function loadPdf() {
-      if (!frame) return
-      const docBody = document.getElementById('docBodyPdf')
-      const url = docBody?.dataset.documentUrl ?? ''
-      if (!url) {
-        if (loading) loading.hidden = true
-        if (errEl) errEl.hidden = false
-        return
-      }
-      if (loading) loading.hidden = false
-      frame.hidden = true
-      if (errEl) errEl.hidden = true
-      frame.src = url
-      frame.addEventListener('load', () => {
-        if (loading) loading.hidden = true
-        frame.hidden = false
-      }, { once: true })
-      // Fallback if iframe load event doesn't fire (some browsers block PDF iframes)
-      setTimeout(() => {
-        if (loading && !loading.hidden) {
-          loading.hidden = true
-          frame.hidden = false
-        }
-      }, 3000)
-    }
-
-    loadPdf()
-
-    // Tab switching
-    tabPdf?.addEventListener('click', () => activateTab(tabPdf, bodyPdf))
-    tabChanges?.addEventListener('click', () => activateTab(tabChanges, bodyChanges))
-
-    // Edit tab — populate contenteditable on first open
-    let editorPopulated = false
-    tabEdit?.addEventListener('click', () => {
-      activateTab(tabEdit, bodyEdit)
-      if (!editorPopulated && v1HtmlContent) {
-        const el = document.getElementById('docEditorContent')
-        if (el) { el.innerHTML = v1HtmlContent; editorPopulated = true }
-      }
-    })
-
-    // Save button
-    const saveBtn    = document.getElementById('editSaveBtn')
-    const saveStatus = document.getElementById('editSaveStatus')
-    saveBtn?.addEventListener('click', async () => {
-      const editorEl = document.getElementById('docEditorContent')
-      if (!editorEl) return
-      const html = editorEl.innerHTML
-      saveBtn.disabled = true
-      if (saveStatus) saveStatus.textContent = 'Saving…'
-      try {
-        const res = await fetch(`${apiUrl}/api/contracts/${contractId}/html`, {
-          method: 'PATCH',
-          credentials: 'include',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ htmlContent: html }),
-        })
-        if (!res.ok) throw new Error('save failed')
-        if (saveStatus) saveStatus.textContent = 'Saved ✓'
-        // Reload PDF so the Document tab reflects the edits
-        loadPdf()
-        setTimeout(() => { if (saveStatus) saveStatus.textContent = '' }, 3000)
-      } catch {
-        if (saveStatus) saveStatus.textContent = 'Save failed — try again'
-      } finally {
-        saveBtn.disabled = false
-      }
-    })
-  })()
-
+<script define:vars={{ apiUrl, contractId: id! }}>
   // ── Stage mapping (mirrors SSR function) ──────────────────────────────────
   function getStage(status) {
     if (status === 'draft') return 1
@@ -2891,222 +2547,6 @@ const userInitial = firstInitial(user?.name, user?.email)
     });
   })();
 
-  // ── Signing wizard: signer cards (Step 1) ────────────────────────────────
-  const addSignerBtn = document.getElementById('addSignerBtn');
-  const signerContainer = document.getElementById('signerRows');
-
-  function refreshSignerRemovers() {
-    if (!signerContainer) return;
-    const cards = signerContainer.querySelectorAll('.signer-card');
-    cards.forEach((card, idx) => {
-      const removeBtn = card.querySelector('.signer-card__remove');
-      if (!removeBtn) return;
-      // Show × only when there are 2+ signers AND this card isn't the first.
-      const show = cards.length > 1 && idx > 0;
-      removeBtn.hidden = !show;
-    });
-  }
-
-  function wireRemoveBtn(btn) {
-    if (!btn || btn.dataset.wired === '1') return;
-    btn.dataset.wired = '1';
-    btn.addEventListener('click', () => {
-      const card = btn.closest('.signer-card');
-      if (!card) return;
-      card.remove();
-      refreshSignerRemovers();
-      if (addSignerBtn) addSignerBtn.style.display = '';
-    });
-  }
-
-  function fillSignerCard(card, person) {
-    if (!card) return;
-    const nameInput = card.querySelector('input[name="signerName[]"]');
-    const emailInput = card.querySelector('input[name="signerEmail[]"]');
-    const roleInput = card.querySelector('select[name="signerRole[]"]');
-    if (nameInput) nameInput.value = person.name || '';
-    if (emailInput) emailInput.value = person.email || '';
-    if (roleInput) roleInput.value = person.role || 'other';
-  }
-
-  function signerEmailExists(email) {
-    if (!email) return false;
-    const normalized = email.trim().toLowerCase();
-    return Array.from(document.getElementsByName('signerEmail[]'))
-      .some((input) => input.value.trim().toLowerCase() === normalized);
-  }
-
-  function findBlankSignerCard() {
-    if (!signerContainer) return null;
-    return Array.from(signerContainer.querySelectorAll('.signer-card')).find((card) => {
-      const nameInput = card.querySelector('input[name="signerName[]"]');
-      const emailInput = card.querySelector('input[name="signerEmail[]"]');
-      return !nameInput?.value.trim() && !emailInput?.value.trim();
-    });
-  }
-
-  function addSignerFromPerson(person) {
-    if (!signerContainer || !person.email || signerEmailExists(person.email)) return;
-    const target = findBlankSignerCard();
-    if (target) {
-      fillSignerCard(target, person);
-      return;
-    }
-    if (signerContainer.children.length >= 4) return;
-    const clone = signerContainer.children[0].cloneNode(true);
-    const cloneRemove = clone.querySelector('.signer-card__remove');
-    if (cloneRemove) cloneRemove.removeAttribute('data-wired');
-    fillSignerCard(clone, person);
-    signerContainer.appendChild(clone);
-    if (cloneRemove) wireRemoveBtn(cloneRemove);
-    refreshSignerRemovers();
-    if (addSignerBtn && signerContainer.children.length >= 4) addSignerBtn.style.display = 'none';
-  }
-
-  if (signerContainer) {
-    signerContainer.querySelectorAll('.signer-card__remove').forEach(wireRemoveBtn);
-    refreshSignerRemovers();
-  }
-
-  if (addSignerBtn && signerContainer) {
-    addSignerBtn.addEventListener('click', () => {
-      if (signerContainer.children.length >= 4) return;
-      const clone = signerContainer.children[0].cloneNode(true);
-      clone.querySelectorAll('input').forEach(i => i.value = '');
-      clone.querySelectorAll('select').forEach(s => s.value = 'counterparty');
-      const cloneRemove = clone.querySelector('.signer-card__remove');
-      if (cloneRemove) cloneRemove.removeAttribute('data-wired');
-      signerContainer.appendChild(clone);
-      if (cloneRemove) wireRemoveBtn(cloneRemove);
-      refreshSignerRemovers();
-      if (signerContainer.children.length >= 4) addSignerBtn.style.display = 'none';
-    });
-  }
-
-  document.querySelectorAll('[data-add-signer]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      addSignerFromPerson({
-        name: btn.dataset.personName || '',
-        email: btn.dataset.personEmail || '',
-        role: btn.dataset.personRole || 'other',
-      });
-    });
-  });
-
-  // ── Signing wizard: step navigation ──────────────────────────────────────
-  (function initSigningWizard() {
-    const step1 = document.getElementById('signing-step-1');
-    const step2 = document.getElementById('signing-step-2');
-    const nextBtn = document.getElementById('signNextBtn');
-    const backBtn = document.getElementById('signBackBtn');
-    const summaryList = document.getElementById('signersSummary');
-    const step1Error = document.getElementById('signStep1Error');
-    if (!step1 || !step2 || !nextBtn || !backBtn || !summaryList) return;
-
-    const setErr = (msg) => {
-      if (!step1Error) return;
-      step1Error.textContent = msg ?? '';
-      step1Error.style.display = msg ? 'block' : 'none';
-    };
-
-    nextBtn.addEventListener('click', () => {
-      const names  = Array.from(document.getElementsByName('signerName[]')).map(i => i.value.trim());
-      const emails = Array.from(document.getElementsByName('signerEmail[]')).map(i => i.value.trim());
-      const roles  = Array.from(document.getElementsByName('signerRole[]')).map(i => i.value);
-
-      for (let i = 0; i < names.length; i++) {
-        if (!names[i] || !emails[i]) {
-          setErr('Please fill in every signer’s name and email.');
-          return;
-        }
-        // Light email check
-        if (!/.+@.+\..+/.test(emails[i])) {
-          setErr(`"${emails[i]}" doesn’t look like a valid email.`);
-          return;
-        }
-      }
-      setErr('');
-
-      // Build summary
-      summaryList.innerHTML = '';
-      names.forEach((n, i) => {
-        const li = document.createElement('li');
-        const role = roles[i] || 'counterparty';
-        const roleLabel = role.charAt(0).toUpperCase() + role.slice(1);
-        const safeName = n.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-        const safeEmail = emails[i].replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-        li.innerHTML = `<span><strong>${safeName}</strong> (${safeEmail})</span><span class="wizard-summary__role">— ${roleLabel}</span>`;
-        summaryList.appendChild(li);
-      });
-
-      step1.hidden = true;
-      step2.hidden = false;
-    });
-
-    backBtn.addEventListener('click', () => {
-      step2.hidden = true;
-      step1.hidden = false;
-    });
-  })();
-
-  // ── Send for Signature ─────────────────────────────────────────────────────
-  const signForm = document.getElementById('signForm');
-  if (signForm) {
-    signForm.addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const btn = document.getElementById('signSubmitBtn');
-      btn.disabled = true;
-      btn.textContent = 'Preparing...';
-      const signError = document.getElementById('signError');
-      if (signError) { signError.textContent = ''; signError.style.display = 'none'; }
-
-      const names  = Array.from(document.getElementsByName('signerName[]')).map(i => i.value);
-      const emails = Array.from(document.getElementsByName('signerEmail[]')).map(i => i.value);
-      const roles  = Array.from(document.getElementsByName('signerRole[]')).map(i => i.value);
-      const message = document.getElementsByName('signMessage')[0]?.value ?? '';
-
-      const signers = names.map((name, i) => ({
-        name,
-        email: emails[i],
-        role: roles[i],
-        order: i + 1,
-      }));
-
-      const res = await fetch(`${apiUrl}/api/contracts/${contractId}/send-for-signature`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ signers, message }),
-        credentials: 'include',
-      });
-
-      if (res.ok) {
-        // Backend returns a BoldSign sendUrl. The sender mounts it in an iframe,
-        // drags signature fields onto the PDF, and clicks Send. The actual
-        // signature request goes out when BoldSign fires the Sent webhook.
-        const { sendUrl } = await res.json();
-        if (!sendUrl) {
-          const signError = document.getElementById('signError');
-          if (signError) { signError.textContent = 'Server did not return a prepare URL.'; signError.style.display = 'block'; }
-          btn.disabled = false;
-          btn.textContent = 'Prepare Signature';
-          return;
-        }
-        // Open the prepare iframe in a full-screen modal. Dispatches a custom
-        // event back to the page-level script (defined in the bottom-of-file
-        // script block) so we keep iframe wiring in one place.
-        window.dispatchEvent(new CustomEvent('genie:open-prepare-iframe', { detail: { sendUrl } }));
-        btn.disabled = false;
-        btn.textContent = 'Prepare Signature';
-      } else {
-        const err = await res.json();
-        const signError = document.getElementById('signError');
-        if (signError) { signError.textContent = `Failed to send for signature: ${err.error || 'Unknown error'}`; signError.style.display = 'block'; }
-        btn.disabled = false;
-        btn.textContent = 'Prepare Signature';
-      }
-    });
-  }
-
   // ── Sign Now is wired up in a separate (Vite-bundled) <script> block below
   //    because it needs to `import` the hellosign-embedded SDK, which is not
   //    allowed inside this inline `define:vars` script.
@@ -3124,9 +2564,6 @@ const userInitial = firstInitial(user?.name, user?.email)
 
   const downloadSignedBtn = document.getElementById('downloadSignedBtn');
   if (downloadSignedBtn) downloadSignedBtn.addEventListener('click', fetchAndOpenSignedDoc);
-
-  const nextActionDownloadBtn = document.getElementById('nextActionDownloadBtn');
-  if (nextActionDownloadBtn) nextActionDownloadBtn.addEventListener('click', fetchAndOpenSignedDoc);
 
   const nextActionSignBtn = document.getElementById('nextActionSignBtn');
   const signNowBtnAlt = document.getElementById('signNowBtn');
@@ -3178,113 +2615,6 @@ const userInitial = firstInitial(user?.name, user?.email)
         btn.textContent = 'Send';
       }
     });
-  }
-
-  // ── Reply composer ─────────────────────────────────────────────────────────
-  const replyForm = document.getElementById('replyForm');
-  if (replyForm) {
-    const textarea     = document.getElementById('replyText');
-    const fileInput    = document.getElementById('replyFile');
-    const attachLabel  = document.getElementById('replyAttachLabel');
-    const sendBtn      = document.getElementById('replyBtn');
-    const replyError   = document.getElementById('replyError');
-    const updateSendState = () => {
-      const hasText = textarea.value.trim().length > 0;
-      sendBtn.disabled = !hasText;
-    };
-
-    // Auto-grow textarea
-    const autoGrow = () => {
-      textarea.style.height = 'auto';
-      const next = Math.min(textarea.scrollHeight, 200);
-      textarea.style.height = `${next}px`;
-    };
-
-    textarea.addEventListener('input', () => {
-      autoGrow();
-      updateSendState();
-    });
-
-    const resetAttachLabel = () => {
-      attachLabel.classList.remove('composer__chip');
-      attachLabel.innerHTML = '📎 Attach revised PDF';
-    };
-
-    fileInput.addEventListener('change', () => {
-      const file = fileInput.files?.[0];
-      if (!file) {
-        resetAttachLabel();
-        return;
-      }
-      attachLabel.classList.add('composer__chip');
-      attachLabel.innerHTML = `
-        <span class="composer__chip-name">📎 ${String(file.name).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}</span>
-        <button type="button" id="replyChipRemove" class="composer__chip-remove" aria-label="Remove attachment">×</button>
-      `;
-      const removeBtn = document.getElementById('replyChipRemove');
-      if (removeBtn) {
-        removeBtn.addEventListener('click', (e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          fileInput.value = '';
-          resetAttachLabel();
-        });
-      }
-    });
-
-    replyForm.addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const labelSnapshot = sendBtn.textContent;
-      sendBtn.disabled = true;
-      sendBtn.textContent = 'Sending…';
-      if (replyError) { replyError.textContent = ''; replyError.style.display = 'none'; }
-
-      const formData = new FormData(replyForm);
-      const messageText = formData.get('message') ?? '';
-
-      const res = await fetch(`${apiUrl}/api/contracts/${contractId}/reply`, {
-        method: 'POST',
-        body: formData,
-        credentials: 'include',
-      });
-
-      if (res.ok) {
-        const threadScroll = document.querySelector('.thread-scroll');
-        if (threadScroll) {
-          const d = new Date();
-          const stamp = `${d.toLocaleString('en-US', { month: 'short', day: 'numeric' })} · ${d.toLocaleString('en-US', { hour: 'numeric', minute: '2-digit' })}`;
-          const safeText = String(messageText).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-          const row = document.createElement('div');
-          row.className = 'thread-row thread-row--outbound';
-          row.innerHTML = `
-            <div class="thread-stack">
-              <div class="thread-bubble thread-bubble--outbound">
-                <div class="thread-bubble__body">${safeText || 'Sent with attachment.'}</div>
-              </div>
-              <div class="thread-stamp">You · ${stamp}</div>
-            </div>
-            <span class="avatar avatar--outbound" aria-hidden="true">${userInitial}</span>
-          `;
-          const emptyEl = threadScroll.querySelector('.thread-empty');
-          if (emptyEl) emptyEl.remove();
-          threadScroll.appendChild(row);
-          threadScroll.scrollTop = threadScroll.scrollHeight;
-        }
-        replyForm.reset();
-        resetAttachLabel();
-        textarea.style.height = 'auto';
-        updateSendState();
-        sendBtn.textContent = labelSnapshot ?? 'Send Reply →';
-      } else {
-        const err = await res.json().catch(() => ({}));
-        if (replyError) { replyError.textContent = `Failed to reply: ${err.error || 'Unknown error'}`; replyError.style.display = 'block'; }
-        sendBtn.textContent = labelSnapshot ?? 'Send Reply →';
-        updateSendState();
-      }
-    });
-
-    // Initial state
-    updateSendState();
   }
 
   // ── Attachment downloads ───────────────────────────────────────────────────

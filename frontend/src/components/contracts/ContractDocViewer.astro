@@ -1,0 +1,209 @@
+---
+import DiffViewer from '../DiffViewer.tsx'
+
+interface Props {
+  documentUrl: string | null
+  contract: any
+  showEditTab: boolean
+  v1HtmlContent: string | null
+  showVersionDiff: boolean
+  ownerVersion: any
+  latestCounterpartyVersion: any
+  showCompleted: boolean
+  apiUrl: string
+  contractId: string
+}
+
+const {
+  documentUrl,
+  contract,
+  showEditTab,
+  v1HtmlContent,
+  showVersionDiff,
+  ownerVersion,
+  latestCounterpartyVersion,
+  showCompleted,
+  apiUrl,
+  contractId,
+} = Astro.props
+---
+
+<section class="doc-viewer card" id="docViewer">
+  <div class="doc-viewer__head">
+    <div class="doc-viewer__tabs" role="tablist">
+      <button class="doc-viewer__tab doc-viewer__tab--active" id="docTabPdf" role="tab" aria-selected="true">
+        Document
+      </button>
+      {showEditTab && (
+        <button class="doc-viewer__tab" id="docTabEdit" role="tab" aria-selected="false">
+          Edit
+        </button>
+      )}
+      {showVersionDiff && (
+        <button class="doc-viewer__tab" id="docTabChanges" role="tab" aria-selected="false">
+          v{latestCounterpartyVersion!.versionNumber} · Their changes
+        </button>
+      )}
+    </div>
+    {showCompleted && contract.signedStorageKey ? (
+      <button id="downloadSignedBtn" class="doc-viewer__download doc-viewer__download--signed" title="Download executed PDF">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <path d="M12 3v13m0 0-4-4m4 4 4-4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M3 20h18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+        </svg>
+        Download executed
+      </button>
+    ) : (
+      <a
+        href="#"
+        class="doc-viewer__download attachment"
+        data-key={contract.storageKey}
+        title="Download PDF"
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <path d="M12 3v13m0 0-4-4m4 4 4-4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M3 20h18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+        </svg>
+        Download
+      </a>
+    )}
+  </div>
+
+  {/* PDF iframe — src baked at SSR time; no client-side fetch needed */}
+  <div class="doc-viewer__body" id="docBodyPdf" data-document-url={documentUrl ?? ''}>
+    <div class="doc-viewer__loading" id="docPdfLoading">
+      <div class="doc-viewer__spinner"></div>
+      <span>Loading document…</span>
+    </div>
+    <iframe
+      id="docPdfFrame"
+      class="doc-viewer__iframe"
+      title="Contract document"
+      hidden
+    ></iframe>
+    <div class="doc-viewer__error" id="docPdfError" hidden>
+      <p>Could not load the PDF preview.</p>
+      <a href="#" class="attachment" data-key={contract.storageKey}>📎 Download PDF instead</a>
+    </div>
+  </div>
+
+  {/* HTML editor — draft AI-generated contracts only */}
+  {showEditTab && (
+    <div class="doc-viewer__body doc-viewer__body--editor" id="docBodyEdit" hidden>
+      <div class="doc-editor">
+        <div class="doc-editor__toolbar">
+          <span id="editSaveStatus" class="edit-save-status"></span>
+          <button type="button" id="editSaveBtn" class="btn-primary btn-sm">Save changes</button>
+        </div>
+        <div
+          id="docEditorContent"
+          class="doc-editor__content"
+          contenteditable="true"
+          spellcheck="false"
+        ></div>
+      </div>
+    </div>
+  )}
+
+  {/* Counterparty diff */}
+  {showVersionDiff && (
+    <div class="doc-viewer__body" id="docBodyChanges" hidden>
+      <div class="doc-diff-wrap">
+        <DiffViewer
+          oldText={ownerVersion!.text}
+          newText={latestCounterpartyVersion!.text}
+          client:visible
+        />
+      </div>
+    </div>
+  )}
+</section>
+
+<script define:vars={{ apiUrl, contractId, v1HtmlContent, showEditTab }}>
+  ;(function initDocViewer() {
+    const tabPdf      = document.getElementById('docTabPdf')
+    const tabEdit     = document.getElementById('docTabEdit')
+    const tabChanges  = document.getElementById('docTabChanges')
+    const bodyPdf     = document.getElementById('docBodyPdf')
+    const bodyEdit    = document.getElementById('docBodyEdit')
+    const bodyChanges = document.getElementById('docBodyChanges')
+    const frame       = document.getElementById('docPdfFrame')
+    const loading     = document.getElementById('docPdfLoading')
+    const errEl       = document.getElementById('docPdfError')
+
+    const allTabs   = [tabPdf, tabEdit, tabChanges].filter(Boolean)
+    const allBodies = [bodyPdf, bodyEdit, bodyChanges].filter(Boolean)
+
+    function activateTab(activeTab, activeBody) {
+      allTabs.forEach(t => { t.classList.remove('doc-viewer__tab--active'); t.setAttribute('aria-selected', 'false') })
+      allBodies.forEach(b => { b.hidden = true })
+      if (activeTab)  { activeTab.classList.add('doc-viewer__tab--active'); activeTab.setAttribute('aria-selected', 'true') }
+      if (activeBody) activeBody.hidden = false
+    }
+
+    function loadPdf() {
+      if (!frame) return
+      const docBody = document.getElementById('docBodyPdf')
+      const url = docBody?.dataset.documentUrl ?? ''
+      if (!url) {
+        if (loading) loading.hidden = true
+        if (errEl) errEl.hidden = false
+        return
+      }
+      if (loading) loading.hidden = false
+      frame.hidden = true
+      if (errEl) errEl.hidden = true
+      frame.src = url
+      frame.addEventListener('load', () => {
+        if (loading) loading.hidden = true
+        frame.hidden = false
+      }, { once: true })
+      setTimeout(() => {
+        if (loading && !loading.hidden) {
+          loading.hidden = true
+          frame.hidden = false
+        }
+      }, 3000)
+    }
+
+    loadPdf()
+
+    tabPdf?.addEventListener('click', () => activateTab(tabPdf, bodyPdf))
+    tabChanges?.addEventListener('click', () => activateTab(tabChanges, bodyChanges))
+
+    let editorPopulated = false
+    tabEdit?.addEventListener('click', () => {
+      activateTab(tabEdit, bodyEdit)
+      if (!editorPopulated && v1HtmlContent) {
+        const el = document.getElementById('docEditorContent')
+        if (el) { el.innerHTML = v1HtmlContent; editorPopulated = true }
+      }
+    })
+
+    const saveBtn    = document.getElementById('editSaveBtn')
+    const saveStatus = document.getElementById('editSaveStatus')
+    saveBtn?.addEventListener('click', async () => {
+      const editorEl = document.getElementById('docEditorContent')
+      if (!editorEl) return
+      const html = editorEl.innerHTML
+      saveBtn.disabled = true
+      if (saveStatus) saveStatus.textContent = 'Saving…'
+      try {
+        const res = await fetch(`${apiUrl}/api/contracts/${contractId}/html`, {
+          method: 'PATCH',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ htmlContent: html }),
+        })
+        if (!res.ok) throw new Error('save failed')
+        if (saveStatus) saveStatus.textContent = 'Saved ✓'
+        loadPdf()
+        setTimeout(() => { if (saveStatus) saveStatus.textContent = '' }, 3000)
+      } catch {
+        if (saveStatus) saveStatus.textContent = 'Save failed — try again'
+      } finally {
+        saveBtn.disabled = false
+      }
+    })
+  })()
+</script>

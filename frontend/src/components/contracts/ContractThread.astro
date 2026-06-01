@@ -1,0 +1,306 @@
+---
+interface Props {
+  threads: any[]
+  showReplyComposer: boolean
+  user: any
+  userInitial: string
+  apiUrl: string
+  contractId: string
+  counterpartyName?: string
+}
+
+const { threads, showReplyComposer, user, userInitial, apiUrl, contractId, counterpartyName } = Astro.props
+
+// ── Thread body helpers ────────────────────────────────────────────────────
+
+const BOILERPLATE_PATTERNS = [
+  /^—\s*Sent via Genie/i,
+  /^Reply to this email to continue/i,
+  /^On .+ wrote:/i,
+  /^-{3,}$/,
+]
+
+const REVIEW_URL_RE = /https?:\/\/[^\s<>"]+\/(review|sign)\/[A-Za-z0-9_-]+/g
+
+function escHtml(str: string): string {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+}
+
+// Returns sanitised HTML for a thread bubble body.
+// - strips boilerplate lines
+// - replaces review/sign URLs with a button
+function cleanBody(raw: string | null | undefined): string {
+  if (!raw) return ''
+  const lines = raw.split('\n')
+  const kept = lines.filter(line => !BOILERPLATE_PATTERNS.some(p => p.test(line.trim())))
+  const html = kept
+    .map(line => {
+      const trimmed = line.trim()
+      // If the entire trimmed line is a review/sign URL, render as button
+      const match = trimmed.match(/^https?:\/\/[^\s]+\/(review|sign)\/[A-Za-z0-9_-]+$/)
+      if (match) {
+        const safe   = escHtml(trimmed)
+        const label  = trimmed.includes('/sign/') ? 'Sign document' : 'Review document'
+        return `<a href="${safe}" class="thread-review-link btn-primary btn-sm" target="_blank" rel="noopener">${label}</a>`
+      }
+      // Inline URL replacement for URLs embedded in text
+      const withButtons = escHtml(line).replace(
+        /https?:\/\/[^\s&]+\/(review|sign)\/[A-Za-z0-9_-]+/g,
+        (url) => {
+          const label = url.includes('/sign/') ? 'Sign document' : 'Review document'
+          // url is already HTML-escaped at this point because escHtml ran first
+          return `<a href="${url}" class="thread-review-link btn-primary btn-sm" target="_blank" rel="noopener">${label}</a>`
+        }
+      )
+      return withButtons
+    })
+    .join('\n')
+    .trim()
+  return html
+}
+
+function fmtShortDate(iso: string): string {
+  try {
+    const d = new Date(iso)
+    const date = d.toLocaleString('en-US', { month: 'short', day: 'numeric' })
+    const time = d.toLocaleString('en-US', { hour: 'numeric', minute: '2-digit' })
+    return `${date} · ${time}`
+  } catch {
+    return ''
+  }
+}
+
+function isRelayAddress(addr: string | null | undefined): boolean {
+  if (!addr) return false
+  return addr.includes('@mail.usetend.in') || addr.includes('@inbound.postmarkapp.com')
+}
+
+function resolveInboundSender(fromName: string | null, fromAddress: string | null): string {
+  // If fromName looks like a real name (not an email), use it
+  if (fromName && !fromName.includes('@')) return fromName
+  // If fromName is an email but not a relay, use it
+  if (fromName && !isRelayAddress(fromName)) return fromName
+  // fromAddress that's not a relay
+  if (fromAddress && !isRelayAddress(fromAddress)) return fromAddress
+  // Fall back to counterpartyName prop
+  return counterpartyName || 'Counterparty'
+}
+
+function firstInitial(...candidates: Array<string | undefined | null>): string {
+  for (const c of candidates) {
+    if (c) {
+      const t = c.trim()
+      if (t.length > 0) return t[0].toUpperCase()
+    }
+  }
+  return '?'
+}
+---
+
+<div class="col-right" id="threadSection">
+  <h2 class="thread-heading">Activity</h2>
+
+  <div class="thread-scroll">
+    {threads.length === 0 ? (
+      <div class="thread-empty">
+        <p class="card-subtext">No activity yet. The thread will appear here once the contract is sent.</p>
+      </div>
+    ) : (
+      threads.map((t: any) => {
+        if (t.direction === 'outbound') {
+          const body = cleanBody(t.body)
+          return (
+            <div class="thread-row thread-row--outbound">
+              <div class="thread-stack">
+                <div class="thread-bubble thread-bubble--outbound">
+                  {t.subject && (
+                    <div class="thread-bubble__subject">{t.subject}</div>
+                  )}
+                  <div class="thread-bubble__body" set:html={body || 'Sent with attachment.'} />
+                  {t.attachments && Array.isArray(t.attachments) && t.attachments.length > 0 && (
+                    <div class="thread-bubble__attachments">
+                      {t.attachments.map((a: any) => (
+                        <a href="#"
+                          class="attachment-chip"
+                          data-key={a.storageKey ?? a.storage_key}>
+                          📎 {a.filename ?? 'attachment.pdf'}
+                        </a>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                <div class="thread-stamp">You · {fmtShortDate(t.emailDate)}</div>
+              </div>
+              <span class="avatar avatar--outbound" aria-hidden="true">{userInitial}</span>
+            </div>
+          )
+        } else if (t.direction === 'inbound') {
+          const senderName    = resolveInboundSender(t.fromName, t.fromAddress)
+          const inboundInitial = firstInitial(senderName, t.fromName, t.fromAddress)
+          const body = cleanBody(t.body)
+          return (
+            <div class="thread-row thread-row--inbound">
+              <span class="avatar avatar--inbound" aria-hidden="true">{inboundInitial}</span>
+              <div class="thread-stack">
+                <div class="thread-bubble thread-bubble--inbound">
+                  {t.subject && (
+                    <div class="thread-bubble__subject">{t.subject}</div>
+                  )}
+                  <div class="thread-bubble__body" set:html={body || 'Received with attachment.'} />
+                  {t.attachments && Array.isArray(t.attachments) && t.attachments.length > 0 && (
+                    <div class="thread-bubble__attachments">
+                      {t.attachments.map((a: any) => (
+                        <a href="#"
+                          class="attachment-chip"
+                          data-key={a.storageKey ?? a.storage_key}>
+                          📎 {a.filename ?? 'attachment.pdf'}
+                        </a>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                <div class="thread-stamp">{senderName} · {fmtShortDate(t.emailDate)}</div>
+              </div>
+            </div>
+          )
+        } else {
+          /* system */
+          return (
+            <div class="thread-system">
+              <span class="thread-system__body">{t.body}</span>
+              {t.emailDate && (
+                <span class="thread-system__date">{fmtShortDate(t.emailDate)}</span>
+              )}
+            </div>
+          )
+        }
+      })
+    )}
+  </div>
+
+  {showReplyComposer && (
+    <div class="composer" id="replySection">
+      <form id="replyForm" class="composer__form">
+        <textarea
+          id="replyText"
+          name="message"
+          rows="3"
+          class="composer__text"
+          placeholder="Write your reply…"
+          required
+        ></textarea>
+        <div class="composer__foot">
+          <label class="composer__attach" for="replyFile">
+            <input type="file" id="replyFile" name="file" accept="application/pdf" class="composer__file-input" />
+            <span id="replyAttachLabel" class="composer__attach-label">📎 Attach revised PDF</span>
+          </label>
+          <button type="submit" id="replyBtn" class="btn-primary composer__send" disabled>
+            Send Reply →
+          </button>
+        </div>
+        <p id="replyError" class="error-banner"></p>
+      </form>
+    </div>
+  )}
+</div>
+
+<script define:vars={{ apiUrl, contractId, userInitial }}>
+  ;(function initReplyComposer() {
+    const replyForm   = document.getElementById('replyForm')
+    if (!replyForm) return
+
+    const textarea    = document.getElementById('replyText')
+    const fileInput   = document.getElementById('replyFile')
+    const attachLabel = document.getElementById('replyAttachLabel')
+    const sendBtn     = document.getElementById('replyBtn')
+    const replyError  = document.getElementById('replyError')
+
+    const updateSendState = () => {
+      sendBtn.disabled = !textarea.value.trim().length
+    }
+
+    const autoGrow = () => {
+      textarea.style.height = 'auto'
+      textarea.style.height = `${Math.min(textarea.scrollHeight, 200)}px`
+    }
+
+    textarea.addEventListener('input', () => { autoGrow(); updateSendState() })
+
+    const resetAttachLabel = () => {
+      attachLabel.classList.remove('composer__chip')
+      attachLabel.innerHTML = '📎 Attach revised PDF'
+    }
+
+    fileInput.addEventListener('change', () => {
+      const file = fileInput.files?.[0]
+      if (!file) { resetAttachLabel(); return }
+      attachLabel.classList.add('composer__chip')
+      const safeName = String(file.name).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+      attachLabel.innerHTML = `
+        <span class="composer__chip-name">📎 ${safeName}</span>
+        <button type="button" id="replyChipRemove" class="composer__chip-remove" aria-label="Remove attachment">×</button>
+      `
+      document.getElementById('replyChipRemove')?.addEventListener('click', (e) => {
+        e.preventDefault(); e.stopPropagation()
+        fileInput.value = ''
+        resetAttachLabel()
+      })
+    })
+
+    replyForm.addEventListener('submit', async (e) => {
+      e.preventDefault()
+      const labelSnapshot = sendBtn.textContent
+      sendBtn.disabled = true
+      sendBtn.textContent = 'Sending…'
+      if (replyError) { replyError.textContent = ''; replyError.style.display = 'none' }
+
+      const formData    = new FormData(replyForm)
+      const messageText = formData.get('message') ?? ''
+
+      const res = await fetch(`${apiUrl}/api/contracts/${contractId}/reply`, {
+        method: 'POST',
+        body: formData,
+        credentials: 'include',
+      })
+
+      if (res.ok) {
+        const threadScroll = document.querySelector('.thread-scroll')
+        if (threadScroll) {
+          const d     = new Date()
+          const stamp = `${d.toLocaleString('en-US', { month: 'short', day: 'numeric' })} · ${d.toLocaleString('en-US', { hour: 'numeric', minute: '2-digit' })}`
+          const safeText = String(messageText).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+          const row = document.createElement('div')
+          row.className = 'thread-row thread-row--outbound'
+          row.innerHTML = `
+            <div class="thread-stack">
+              <div class="thread-bubble thread-bubble--outbound">
+                <div class="thread-bubble__body">${safeText || 'Sent with attachment.'}</div>
+              </div>
+              <div class="thread-stamp">You · ${stamp}</div>
+            </div>
+            <span class="avatar avatar--outbound" aria-hidden="true">${userInitial}</span>
+          `
+          threadScroll.querySelector('.thread-empty')?.remove()
+          threadScroll.appendChild(row)
+          threadScroll.scrollTop = threadScroll.scrollHeight
+        }
+        replyForm.reset()
+        resetAttachLabel()
+        textarea.style.height = 'auto'
+        updateSendState()
+        sendBtn.textContent = labelSnapshot ?? 'Send Reply →'
+      } else {
+        const err = await res.json().catch(() => ({}))
+        if (replyError) { replyError.textContent = `Failed to reply: ${err.error || 'Unknown error'}`; replyError.style.display = 'block' }
+        sendBtn.textContent = labelSnapshot ?? 'Send Reply →'
+        updateSendState()
+      }
+    })
+
+    updateSendState()
+  })()
+</script>
