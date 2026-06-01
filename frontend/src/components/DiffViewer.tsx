@@ -1,54 +1,62 @@
-import React from 'react'
-import ReactDiffViewer, { DiffMethod } from 'react-diff-viewer-continued'
+import React, { useMemo } from 'react'
+import { diffWords } from 'diff'
 
 interface DiffViewerProps {
   oldText: string
   newText: string
-  oldTitle?: string
-  newTitle?: string
 }
 
-export const DiffViewer: React.FC<DiffViewerProps> = ({
-  oldText,
-  newText,
-  oldTitle = 'Previous Version',
-  newTitle = 'Returned Version',
-}) => {
+export const DiffViewer: React.FC<DiffViewerProps> = ({ oldText, newText }) => {
+  const parts = useMemo(() => diffWords(oldText, newText), [oldText, newText])
+
   return (
-    <div className="rounded-lg border border-slate-200 overflow-hidden bg-white">
-      <ReactDiffViewer
-        oldValue={oldText}
-        newValue={newText}
-        splitView={true}
-        leftTitle={oldTitle}
-        rightTitle={newTitle}
-        compareMethod={DiffMethod.WORDS}
-        styles={{
-          variables: {
-            light: {
-              diffViewerBackground: '#fff',
-              diffViewerColor: '#212529',
-              addedBackground: '#e6ffed',
-              addedColor: '#24292e',
-              removedBackground: '#ffeef0',
-              removedColor: '#24292e',
-              wordAddedBackground: '#acf2bd',
-              wordRemovedBackground: '#fdb8c0',
-              addedGutterBackground: '#cdffd8',
-              removedGutterBackground: '#ffdce0',
-              gutterColor: '#959da5',
-              codeFoldGutterBackground: '#f1f8ff',
-              codeFoldBackground: '#f7f8fa',
-              codeFoldContentColor: '#586069',
-            },
-          },
-          line: {
-            fontSize: '0.875rem',
-            lineHeight: '1.5',
-            fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
-          },
-        }}
-      />
+    <div
+      style={{
+        fontFamily: 'inherit',
+        fontSize: '0.9rem',
+        lineHeight: '1.8',
+        color: '#1a1a1a',
+        padding: '1.5rem',
+        whiteSpace: 'pre-wrap',
+        wordBreak: 'break-word',
+        overflowWrap: 'break-word',
+      }}
+    >
+      {parts.map((part, i) => {
+        if (part.added) {
+          return (
+            <ins
+              key={i}
+              style={{
+                background: '#d4f7d4',
+                color: '#1a6b1a',
+                textDecoration: 'none',
+                borderRadius: '2px',
+                padding: '0 1px',
+              }}
+            >
+              {part.value}
+            </ins>
+          )
+        }
+        if (part.removed) {
+          return (
+            <del
+              key={i}
+              style={{
+                background: '#ffd7d7',
+                color: '#8b1a1a',
+                textDecoration: 'line-through',
+                borderRadius: '2px',
+                padding: '0 1px',
+              }}
+            >
+              {part.value}
+            </del>
+          )
+        }
+        return <span key={i}>{part.value}</span>
+      })}
     </div>
   )
 }

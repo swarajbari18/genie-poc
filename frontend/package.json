@@ -14,19 +14,16 @@
   },
   "dependencies": {
     "@astrojs/check": "^0.9.9",
-    "@astrojs/cloudflare": "^13.5.4",
-    "@astrojs/react": "^5.0.5",
+    "@astrojs/cloudflare": "^13.6.0",
+    "@astrojs/react": "^5.0.6",
     "@types/react": "^19.2.15",
     "@types/react-dom": "^19.2.3",
-    "astro": "^6.3.7",
+    "astro": "^6.4.2",
     "lucide-react": "^1.16.0",
     "react": "^19.2.6",
     "react-diff-viewer-continued": "^4.2.2",
     "react-dom": "^19.2.6",
     "typescript": "^6.0.3",
     "wrangler": "^4.94.0"
-  },
-  "overrides": {
-    "vite": "^7"
   }
 }

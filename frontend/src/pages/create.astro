@@ -94,7 +94,7 @@ try {
         <div class="cr-actions">
           <button type="submit" id="crSubmitBtn" class="btn-primary cr-submit" disabled>
             <span id="crBtnText">Generate contract</span>
-            <svg id="crSpinner" class="cr-spinner" hidden width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <svg id="crSpinner" class="cr-spinner" {...{hidden: true} as object} width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
               <circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2.5" stroke-dasharray="28" stroke-dashoffset="10" />
             </svg>
           </button>

@@ -1,6 +1,6 @@
 import { db } from '../db/client.js'
-import { contracts, contractThreads } from '../db/schema.js'
-import { eq, and, lt, desc, sql } from 'drizzle-orm'
+import { contracts, contractThreads, contractVersions } from '../db/schema.js'
+import { eq, and, lt, desc, sql, asc } from 'drizzle-orm'
 import { contractsBucket } from '../lib/storage.js'
 import { notifyUser } from '../lib/events.js'
 import { log } from '../lib/logger.js'
@@ -265,4 +265,106 @@ ${JSON.stringify(patch.hunks.map(h => h.lines).flat(), null, 2)}`
       .catch(() => {}) // Ignore secondary failure
     await notifyUser(ownerUserId, { contractId, status: 'replied' })
   }
+}
+
+export interface TextReplyAnalysis {
+  type: 'text_reply'
+  message: string
+  sentiment: 'accept' | 'modify' | 'reject' | 'question'
+  changes: string[]
+  summary: string
+  summaryStatus: 'ok' | 'failed' | 'skipped_no_key'
+  model: string | null
+  generatedAt: string
+}
+
+interface RunTextReplyArgs {
+  contractId: string
+  ownerUserId: string
+  replyText: string
+}
+
+export async function runTextReplyAnalysis({
+  contractId,
+  ownerUserId,
+  replyText,
+}: RunTextReplyArgs) {
+  log.info('aiAnalysis', 'Starting text reply analysis', { contractId })
+
+  const v1 = await db.query.contractVersions.findFirst({
+    where: eq(contractVersions.contractId, contractId),
+    orderBy: [asc(contractVersions.versionNumber)],
+  })
+
+  const contractText = v1?.text ?? ''
+  const contractSnippet = contractText.slice(0, 3000)
+
+  let sentiment: TextReplyAnalysis['sentiment'] = 'modify'
+  let changes: string[] = []
+  let summary = ''
+  let summaryStatus: TextReplyAnalysis['summaryStatus'] = 'skipped_no_key'
+  let modelName: string | null = null
+
+  const apiKey = process.env.GEMINI_API_KEY
+  if (apiKey) {
+    try {
+      const genAI = new GoogleGenerativeAI(apiKey)
+      const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash-lite' })
+
+      const prompt = `You are a legal assistant. A counterparty has replied to a contract negotiation.
+
+CONTRACT (excerpt):
+${contractSnippet}
+
+COUNTERPARTY'S MESSAGE:
+${replyText}
+
+Respond with JSON only (no markdown fences):
+{
+  "sentiment": "accept" | "modify" | "reject" | "question",
+  "changes": ["change 1", "change 2"],
+  "summary": "one sentence summary"
+}
+
+Rules:
+- "accept": they agree as-is. "reject": they decline. "modify": they want specific changes. "question": asking for clarification.
+- changes: only for "modify" sentiment. Concrete and specific (e.g. "Extend term from 1 year to 2 years"). Max 5 items. Empty array otherwise.
+- summary: plain English for a non-lawyer, one sentence.`
+
+      const result = await Promise.race([
+        model.generateContent(prompt),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('LLM timeout')), 15000)),
+      ])
+
+      const raw = result.response.text().trim().replace(/^```json\n?/, '').replace(/\n?```$/, '')
+      const parsed = JSON.parse(raw)
+      sentiment = parsed.sentiment ?? 'modify'
+      changes = Array.isArray(parsed.changes) ? parsed.changes : []
+      summary = parsed.summary ?? ''
+      summaryStatus = 'ok'
+      modelName = 'gemini-2.5-flash-lite'
+    } catch (err: any) {
+      log.error('aiAnalysis', 'Text reply LLM failed', { contractId, error: err.message })
+      summaryStatus = 'failed'
+    }
+  }
+
+  const analysis: TextReplyAnalysis = {
+    type: 'text_reply',
+    message: replyText,
+    sentiment,
+    changes,
+    summary,
+    summaryStatus,
+    model: modelName,
+    generatedAt: new Date().toISOString(),
+  }
+
+  await db
+    .update(contracts)
+    .set({ aiAnalysis: analysis as any, updatedAt: new Date() })
+    .where(eq(contracts.id, contractId))
+
+  await notifyUser(ownerUserId, { contractId, status: 'replied' })
+  log.info('aiAnalysis', 'Text reply analysis complete', { contractId, sentiment })
 }

@@ -455,8 +455,39 @@ const userInitial = firstInitial(user?.name, user?.email)
         {/* UNDER REVIEW — Info card + optional AI analysis */}
         {showUnderReview && (
           <>
-            {/* AI Analysis (if available) */}
-            {contract.aiAnalysis ? (
+            {/* AI Analysis — text reply */}
+            {contract.aiAnalysis?.type === 'text_reply' && (
+              <section class="card ai-card">
+                <div class="ai-card__header">
+                  <div class="ai-card__title-row">
+                    <span class="badge ai-badge">AI</span>
+                    <h2 class="card-heading">
+                      {contract.aiAnalysis.sentiment === 'accept' && 'They accepted'}
+                      {contract.aiAnalysis.sentiment === 'reject' && 'They declined'}
+                      {contract.aiAnalysis.sentiment === 'modify' && 'They want changes'}
+                      {contract.aiAnalysis.sentiment === 'question' && 'They have a question'}
+                    </h2>
+                  </div>
+                </div>
+
+                {contract.aiAnalysis.summaryStatus === 'ok' ? (
+                  <div class="ai-summary">{contract.aiAnalysis.summary}</div>
+                ) : (
+                  <p class="card-subtext">AI summary unavailable — read their reply in the thread.</p>
+                )}
+
+                {contract.aiAnalysis.changes?.length > 0 && (
+                  <ul class="ai-changes-list">
+                    {contract.aiAnalysis.changes.map((c: string) => (
+                      <li class="ai-changes-list__item">{c}</li>
+                    ))}
+                  </ul>
+                )}
+              </section>
+            )}
+
+            {/* AI Analysis — PDF diff */}
+            {contract.aiAnalysis && contract.aiAnalysis.type !== 'text_reply' && (
               <section class="card ai-card">
                 <div class="ai-card__header">
                   <div class="ai-card__title-row">
@@ -464,34 +495,23 @@ const userInitial = firstInitial(user?.name, user?.email)
                     <h2 class="card-heading">What changed</h2>
                   </div>
                   <div class="diff-stats">
-                    <span class="diff-stat diff-stat--add">
-                      +{contract.aiAnalysis.stats.additions} added
-                    </span>
-                    <span class="diff-stat diff-stat--del">
-                      -{contract.aiAnalysis.stats.deletions} removed
-                    </span>
-                    {contract.aiAnalysis.stats.unchanged != null && (
-                      <span class="diff-stat diff-stat--unch">
-                        {contract.aiAnalysis.stats.unchanged} unchanged
-                      </span>
-                    )}
+                    <span class="diff-stat diff-stat--add">+{contract.aiAnalysis.stats.additions} added</span>
+                    <span class="diff-stat diff-stat--del">-{contract.aiAnalysis.stats.deletions} removed</span>
                   </div>
                 </div>
 
                 {contract.aiAnalysis.summaryStatus === 'ok' ? (
-                  <div class="ai-summary">
-                    {contract.aiAnalysis.summary}
-                  </div>
+                  <div class="ai-summary">{contract.aiAnalysis.summary}</div>
                 ) : (
                   <p class="card-subtext">
                     {contract.aiAnalysis.summaryStatus === 'failed'
                       ? 'Plain-English summary unavailable — see the diff below.'
-                      : 'AI summary is disabled (no API key). See the deterministic diff below.'}
+                      : 'AI summary disabled. See the diff below.'}
                   </p>
                 )}
 
                 <details class="diff-details">
-                  <summary class="diff-summary">View full diff (word-level)</summary>
+                  <summary class="diff-summary">View full diff</summary>
                   <div class="diff-viewer-wrap">
                     <DiffViewer
                       oldText={contract.aiAnalysis.oldText}
@@ -505,40 +525,6 @@ const userInitial = firstInitial(user?.name, user?.email)
                   <a href="#" class="attachment" data-key={contract.aiAnalysis.toStorageKey}>
                     📎 Download Their Version (PDF)
                   </a>
-                  <span class="diff-note">Diff is computed from extracted text; formatting may vary.</span>
-                </div>
-              </section>
-            ) : null}
-
-            {/* Version diff — from review workspace */}
-            {showVersionDiff && (
-              <section class="card ai-card">
-                <div class="ai-card__header">
-                  <div class="ai-card__title-row">
-                    <span class="badge ai-badge">v{latestCounterpartyVersion.versionNumber}</span>
-                    <h2 class="card-heading">Proposed changes</h2>
-                  </div>
-                  <p class="card-subtext" style="margin:0">
-                    Submitted via review workspace
-                    {latestCounterpartyVersion.message && ` · ${latestCounterpartyVersion.message}`}
-                  </p>
-                </div>
-
-                <details class="diff-details" open>
-                  <summary class="diff-summary">View version diff (text-level)</summary>
-                  <div class="diff-viewer-wrap">
-                    <DiffViewer
-                      oldText={ownerVersion.text}
-                      newText={latestCounterpartyVersion.text}
-                      client:visible
-                    />
-                  </div>
-                </details>
-
-                <div class="ai-card__footer">
-                  <span class="diff-note">
-                    v1 = original document · v{latestCounterpartyVersion.versionNumber} = counterparty proposed changes
-                  </span>
                 </div>
               </section>
             )}
@@ -1605,6 +1591,29 @@ const userInitial = firstInitial(user?.name, user?.email)
     margin-bottom: 1.25rem;
     color: var(--color-text-primary);
     line-height: 1.6;
+  }
+
+  .ai-changes-list {
+    list-style: none;
+    padding: 0;
+    margin: 0 0 1.25rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+  .ai-changes-list__item {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.6rem;
+    font-size: 0.9375em;
+    line-height: 1.5;
+    color: var(--color-text-primary);
+  }
+  .ai-changes-list__item::before {
+    content: '→';
+    flex-shrink: 0;
+    color: var(--color-accent);
+    font-weight: 600;
   }
 
   .diff-details {

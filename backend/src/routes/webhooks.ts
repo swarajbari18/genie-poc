@@ -12,7 +12,7 @@ import { contractsBucket } from '../lib/storage.js'
 import { contractSigners } from '../db/schema.js'
 import { log } from '../lib/logger.js'
 import { notifyUser } from '../lib/events.js'
-import { runDiffAnalysis } from '../services/aiAnalysis.js'
+import { runDiffAnalysis, runTextReplyAnalysis } from '../services/aiAnalysis.js'
 
 const webhooksRouter = new Hono()
 
@@ -800,8 +800,11 @@ async function processInbound(inboundId: string, payload: any) {
     }
   }
 
-  // AI pipeline stub — wired in Component 8.
-  await triggerAiPipeline(insertContractId, attachmentRecords)
+  // Text reply analysis — fires when the reply has no PDF attachment.
+  if (contractId) {
+    const replyText = payload.TextBody ?? ''
+    await triggerAiPipeline(contractId, attachmentRecords, replyText)
+  }
 }
 
 async function markInboundProcessed(inboundId: string, threadEntryId: string | null) {
@@ -816,12 +819,23 @@ async function markInboundProcessed(inboundId: string, threadEntryId: string | n
 
 async function triggerAiPipeline(
   contractId: string,
-  attachments: Array<{ storageKey: string }>
+  attachments: Array<{ storageKey: string }>,
+  replyText: string,
 ): Promise<void> {
-  // Stub — Component 8 will wire this to the AI diff/analysis pipeline.
-  log.info('webhooks', 'AI pipeline stub — not yet implemented', {
+  // Only run for text-only replies — PDF replies are handled by runDiffAnalysis above.
+  if (attachments.length > 0 || !replyText.trim()) return
+
+  const owning = await db.query.contracts.findFirst({
+    where: eq(contracts.id, contractId),
+  })
+  if (!owning) return
+
+  runTextReplyAnalysis({
     contractId,
-    attachments: attachments.length,
+    ownerUserId: owning.userId,
+    replyText,
+  }).catch((err) => {
+    log.error('webhooks', 'Text reply analysis failed', { contractId, error: err?.message })
   })
 }
 

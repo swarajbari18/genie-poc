@@ -266,6 +266,7 @@ contractsRouter.get('/:id', requireAuth, async (c) => {
             'id',            v.id,
             'versionNumber', v.version_number,
             'authoredBy',    v.authored_by,
+            'text',          v.text,
             'htmlContent',   v.html_content,
             'storageKey',    v.storage_key,
             'message',       v.message,
