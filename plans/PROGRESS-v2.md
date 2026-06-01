@@ -101,5 +101,52 @@
 
 **Verified:** User confirmed visually — document viewer visible, metadata card gone, signing confirm card functional with pencil icon, thread boilerplate stripped, hint line visible instead of colored banner.
 
+---
 
+## 2026-06-01 — E-B3: Dashboard restructure ✓
+
+**Commit:** pending
+
+**Changes:**
+- **Sidebar removed** — `WORKSPACE / PROJECTS` sidebar (220px flex column) gone entirely
+- **Three actionability groups replace project/asset layout:**
+  - `NEEDS YOU` — `awaitingMySignature` OR status in `replied / negotiating / received / ai_processing`; rendered as large cards (thumbnail slot + title + status subtitle + accent CTA button)
+  - `WAITING ON OTHERS` — non-terminal, non-urgent (sent, draft, out_for_signature, partially_signed, declined); rendered as compact `·` rows
+  - `DONE` — signed/completed; collapsed by default, `▸` toggle to expand
+- **One creation entry** — single `+ New contract` button in toolbar (top-left); all other creation entry points (per-project `+ Contract`, asset card `+ New`, sidebar `+ New project`) removed from primary surface
+- **Projects → filter dropdown** — `All projects ▾` in toolbar (top-right); selecting a project hides contracts from other projects via `data-project` attribute toggling; `+ New project` moved to bottom of filter menu
+- **No dual representation** — each contract appears exactly once (previously shown in both ASSETS row and IN PROGRESS row)
+- **Targeted SSE** — on SSE event, fetches fresh `/api/contracts`, diffs against stored state, rebuilds only `groupsContainer` if something changed; no `location.reload()` (no white flash)
+- **Preserved exactly:** sign-now pulse strip, demo seed banner, empty state, new project modal
+
+**Verified:** User confirmed all checklist items ✓ — no sidebar, toolbar with correct CTAs, three groups with correct membership, cards vs rows distinction, DONE collapsed, no duplicate contracts, filter dropdown functional.
+
+---
+
+## ⚠️ CRITICAL PRODUCT FINDING — A6: AI Diff feature seam is broken
+
+**Discovered:** 2026-06-01, during E-B3 investigation of the Vite `react-diff-viewer-continued` warning.
+
+**Why it matters:** The colour-coded contract diff is the headline differentiator of this product — "negotiate + AI diff in one place." It is currently silently broken. Every demo that doesn't exercise it is selling the product short (per spec A6 language).
+
+**What is supposed to happen:**
+1. Counterparty returns a revised PDF via the `/review/:token` page
+2. Inbound webhook receives it, calls `runDiffAnalysis()` in `aiAnalysis.ts`
+3. AI extracts both texts, diffs them, generates a plain-English Gemini summary
+4. `DiffViewer` on `contracts/[id].astro` shows the split diff with added/removed words highlighted
+
+**The seam break (two problems, both must be fixed):**
+
+**Problem 1 — Wrong storage target.** `runDiffAnalysis()` stores the result as a JSON blob in `contracts.aiAnalysis` (the column on the contracts table). The frontend (`[id].astro`) reads from `contract_versions` (the `contract_versions` table), looking for a row where `authoredBy === 'counterparty'`. No code ever writes a `contract_versions` row with `authoredBy: 'counterparty'`. `showVersionDiff` is therefore always `false` — the diff panel never renders.
+
+**Problem 2 — Trigger condition.** `runDiffAnalysis()` only fires when the inbound email carries a **PDF attachment** (`attachmentRecords.find(a => a.contentType includes 'pdf')`). If the counterparty replies with text only, the attachment check fails silently and analysis never runs. Also, `triggerAiPipeline()` (called on every inbound) is a **stub** (`log.info 'AI pipeline stub — not yet implemented'`) — it does nothing.
+
+**Fix required (A6, not yet scheduled):**
+- After `runDiffAnalysis()` completes successfully, write a `contract_versions` row with `authoredBy: 'counterparty'`, `text: newRawText`, `versionNumber: <next>`. This bridges the seam so the frontend finds what it's looking for.
+- OR: change the frontend to read from `contracts.aiAnalysis` directly (less clean — the text is already in the right shape in `contract_versions` for the owner's v1).
+- The clean fix is backend-side: insert the counterparty version into `contract_versions` as part of `runDiffAnalysis()`.
+
+**Status:** Not yet fixed. Logged here so it is not lost. Must be addressed in A6 (item 10 in spec order) before the demo, not after.
+
+---
 
