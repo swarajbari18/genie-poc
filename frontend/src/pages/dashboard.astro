@@ -121,19 +121,7 @@ const projects = projectsData.map((p: any) => ({ id: p.id, name: p.name }))
       </div>
     )}
 
-    {/* ── Demo seed banner (keep) ────────────────────────────────────────── */}
-    {hasNoProjects && !isEmpty && (
-      <div class="seed-banner">
-        <div class="seed-banner__copy">
-          <strong>Load the demo library</strong>
-          <span>Acme Corp + Beta Technologies — NDA, service agreement, negotiation diff</span>
-        </div>
-        <button class="btn-primary" id="seedBtn">Load demo</button>
-        <p id="seedHint" class="seed-banner__hint"></p>
-      </div>
-    )}
-
-    {/* ── Empty state (keep) ────────────────────────────────────────────── */}
+    {/* ── Empty state ───────────────────────────────────────────────────── */}
     {isEmpty && (
       <div class="empty">
         <div class="empty__icon">
@@ -146,9 +134,7 @@ const projects = projectsData.map((p: any) => ({ id: p.id, name: p.name }))
         <p>Create contracts with AI, send for review, negotiate, sign.</p>
         <div class="empty__btns">
           <a href="/create" class="btn-primary">Create a contract</a>
-          <button class="btn-ghost" id="seedBtn">Load demo library</button>
         </div>
-        <p id="seedHint" class="empty__hint"></p>
       </div>
     )}
 
@@ -157,6 +143,7 @@ const projects = projectsData.map((p: any) => ({ id: p.id, name: p.name }))
       <>
         <div class="db-toolbar">
           <a href="/create" class="btn-primary db-toolbar__new">+ New contract</a>
+          <button class="btn-ghost db-toolbar__new-proj" id="newProjFromFilter">+ New project</button>
 
           {projects.length > 0 && (
             <div class="db-filter" id="projectFilter">
@@ -168,8 +155,6 @@ const projects = projectsData.map((p: any) => ({ id: p.id, name: p.name }))
                 {projects.map((p: any) => (
                   <button class="db-filter__opt" data-filter={p.id}>{p.name}</button>
                 ))}
-                <div class="db-filter__divider"></div>
-                <button class="db-filter__opt db-filter__opt--action" id="newProjFromFilter">+ New project</button>
               </div>
             </div>
           )}
@@ -721,19 +706,6 @@ document.addEventListener('click', e => {
   }
 })
 
-// ── Seed demo ─────────────────────────────────────────────────────────────
-document.querySelectorAll('#seedBtn').forEach(btn => {
-  btn.addEventListener('click', async () => {
-    btn.disabled = true; btn.textContent = 'Loading…'
-    const hint = document.getElementById('seedHint')
-    if (hint) hint.textContent = 'Creating demo contracts…'
-    try {
-      const res = await fetch(`${apiUrl}/api/seed/demo`, { method: 'POST', credentials: 'include' })
-      if ((await res.json()).ok) { if (hint) hint.textContent = 'Done. Reloading…'; setTimeout(() => location.reload(), 600) }
-    } catch { if (hint) hint.textContent = 'Network error.'; btn.disabled = false; btn.textContent = 'Load demo' }
-  })
-})
-
 // ── New project modal ──────────────────────────────────────────────────────
 const modal   = document.getElementById('projModal')
 const form    = document.getElementById('projForm')
@@ -741,11 +713,7 @@ const projErr = document.getElementById('projErr')
 const openModal  = () => { if (modal) modal.hidden = false }
 const closeModal = () => { if (modal) modal.hidden = true }
 
-document.getElementById('newProjFromFilter')?.addEventListener('click', () => {
-  if (filterMenu) filterMenu.hidden = true
-  filterBtn?.setAttribute('aria-expanded', 'false')
-  openModal()
-})
+document.getElementById('newProjFromFilter')?.addEventListener('click', openModal)
 document.getElementById('projCancel')?.addEventListener('click', closeModal)
 modal?.addEventListener('click', e => { if (e.target === modal) closeModal() })
 form?.addEventListener('submit', async e => {

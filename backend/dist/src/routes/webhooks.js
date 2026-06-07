@@ -9,7 +9,7 @@ import { contractsBucket } from '../lib/storage.js';
 import { contractSigners } from '../db/schema.js';
 import { log } from '../lib/logger.js';
 import { notifyUser } from '../lib/events.js';
-import { runDiffAnalysis } from '../services/aiAnalysis.js';
+import { runDiffAnalysis, runTextReplyAnalysis } from '../services/aiAnalysis.js';
 const webhooksRouter = new Hono();
 const POSTMARK_BASIC = Buffer.from(`${process.env.POSTMARK_INBOUND_WEBHOOK_USER}:${process.env.POSTMARK_INBOUND_WEBHOOK_PASS}`).toString('base64');
 function verifyPostmark(authHeader) {
@@ -598,7 +598,16 @@ async function processInbound(inboundId, payload) {
         const senderEmail = payload.FromFull?.Email ?? payload.From ?? '';
         const senderName = payload.FromFull?.Name ?? null;
         const subject = payload.Subject ?? '(no subject)';
-        const title = firstAttachment?.filename || subject || 'Received contract';
+        // Prefer subject with Genie suffix stripped; fall back to title-cased filename
+        const cleanSubject = subject.split(' — ')[0].trim();
+        const cleanFilename = firstAttachment?.filename
+            ? firstAttachment.filename
+                .replace(/\.pdf$/i, '')
+                .replace(/[-_]+/g, ' ')
+                .replace(/\b\w/g, (ch) => ch.toUpperCase())
+                .trim()
+            : null;
+        const title = (cleanSubject && cleanSubject !== '(no subject)') ? cleanSubject : (cleanFilename ?? 'Received contract');
         await db.insert(contracts).values({
             id: receivedContractId,
             userId: serviceEmail.userId,
@@ -699,8 +708,11 @@ async function processInbound(inboundId, payload) {
             });
         }
     }
-    // AI pipeline stub — wired in Component 8.
-    await triggerAiPipeline(insertContractId, attachmentRecords);
+    // Text reply analysis — fires when the reply has no PDF attachment.
+    if (contractId) {
+        const replyText = payload.TextBody ?? '';
+        await triggerAiPipeline(contractId, attachmentRecords, replyText);
+    }
 }
 async function markInboundProcessed(inboundId, threadEntryId) {
     await db.update(inboundEmails)
@@ -711,11 +723,21 @@ async function markInboundProcessed(inboundId, threadEntryId) {
     })
         .where(eq(inboundEmails.id, inboundId));
 }
-async function triggerAiPipeline(contractId, attachments) {
-    // Stub — Component 8 will wire this to the AI diff/analysis pipeline.
-    log.info('webhooks', 'AI pipeline stub — not yet implemented', {
+async function triggerAiPipeline(contractId, attachments, replyText) {
+    // Only run for text-only replies — PDF replies are handled by runDiffAnalysis above.
+    if (attachments.length > 0 || !replyText.trim())
+        return;
+    const owning = await db.query.contracts.findFirst({
+        where: eq(contracts.id, contractId),
+    });
+    if (!owning)
+        return;
+    runTextReplyAnalysis({
         contractId,
-        attachments: attachments.length,
+        ownerUserId: owning.userId,
+        replyText,
+    }).catch((err) => {
+        log.error('webhooks', 'Text reply analysis failed', { contractId, error: err?.message });
     });
 }
 export default webhooksRouter;

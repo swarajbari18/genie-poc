@@ -137,6 +137,8 @@ export const contracts = pgTable('contracts', {
     sentAt: timestamp('sent_at', { withTimezone: true, mode: 'date' }),
     // FK → projects.id (nullable — contracts can exist without a project)
     projectId: text('project_id'),
+    // All review recipients — [{name, email}]. recipientName/Email hold first entry for display.
+    recipients: jsonb('recipients').$type(),
     // AI analysis output (stub for now)
     aiAnalysis: jsonb('ai_analysis'),
     aiStartedAt: timestamp('ai_started_at', { withTimezone: true, mode: 'date' }),
@@ -230,6 +232,7 @@ export const contractVersions = pgTable('contract_versions', {
     contractId: text('contract_id').notNull(),
     versionNumber: integer('version_number').notNull(),
     text: text('text').notNull(),
+    htmlContent: text('html_content'),
     storageKey: text('storage_key'),
     authoredBy: text('authored_by').notNull(), // 'owner' | 'counterparty'
     message: text('message'),

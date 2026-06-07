@@ -123,12 +123,8 @@ if (rawError === 'access_denied') {
         credentials: 'include',
       });
 
-      if (!res.ok) {
-        throw new Error(`Server responded with ${res.status}`);
-      }
-
+      if (!res.ok) throw new Error(`Server responded with ${res.status}`);
       const data = await res.json();
-
       if (data.url) {
         window.location.href = data.url;
       } else {

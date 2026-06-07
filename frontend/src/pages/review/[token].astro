@@ -728,7 +728,7 @@ const alreadySubmitted = sessionData?.status === 'submitted'
     font-size: 0.9375rem;
   }
 
-  .rv-btn-accent {
+  :global(.rv-btn-accent) {
     background: var(--color-brand-mid);
     color: #fff;
     border: none;
@@ -740,9 +740,9 @@ const alreadySubmitted = sessionData?.status === 'submitted'
     cursor: pointer;
     transition: opacity 0.15s;
   }
-  .rv-btn-accent:hover { opacity: 0.88; }
+  :global(.rv-btn-accent:hover) { opacity: 0.88; }
 
-  .rv-btn-ghost {
+  :global(.rv-btn-ghost) {
     background: none;
     border: 1px solid var(--color-border-default);
     border-radius: var(--radius-button);
@@ -754,7 +754,7 @@ const alreadySubmitted = sessionData?.status === 'submitted'
     cursor: pointer;
     transition: background 0.15s, color 0.15s;
   }
-  .rv-btn-ghost:hover { background: var(--color-bg-subtle); color: var(--color-text-primary); }
+  :global(.rv-btn-ghost:hover) { background: var(--color-bg-subtle); color: var(--color-text-primary); }
 
   .rv-error-text {
     color: #dc2626;

@@ -18,7 +18,7 @@ import {
   serviceEmails,
 } from '../db/schema.js'
 import { eq, and, desc, asc, sql, inArray } from 'drizzle-orm'
-import { getServiceEmailByUserId } from '../services/serviceEmail.js'
+import { getServiceEmailByUserId, resolveDeliveryAddress } from '../services/serviceEmail.js'
 import { rememberContact } from '../services/contacts.js'
 import { extractPdfText } from '../services/textExtract.js'
 import { log } from '../lib/logger.js'
@@ -441,6 +441,11 @@ contractsRouter.post('/:id/send', requireAuth, async (c) => {
   const sentMessageIds: string[] = []
 
   for (const recipient of recipients) {
+    // If the recipient is a Genie user, deliver to their service address so the
+    // email stays on-domain while Postmark is pending approval. Falls back to
+    // the original address for non-Genie recipients.
+    const deliveryAddress = await resolveDeliveryAddress(recipient.email)
+
     // Each recipient gets their own review session (private workspace + unique link).
     const reviewToken = crypto.randomUUID()
     await db.insert(reviewSessions).values({
@@ -456,7 +461,7 @@ contractsRouter.post('/:id/send', requireAuth, async (c) => {
 
     const { messageId } = await sendContractEmail({
       fromAddress,
-      toAddress: recipient.email,
+      toAddress: deliveryAddress,
       toName: recipient.name,
       subject,
       contractId,
@@ -476,7 +481,7 @@ contractsRouter.post('/:id/send', requireAuth, async (c) => {
       direction: 'outbound',
       postmarkMessageId: messageId,
       fromAddress,
-      toAddress: recipient.email,
+      toAddress: deliveryAddress,
       subject,
       emailDate: new Date(),
     })

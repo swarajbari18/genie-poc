@@ -11,9 +11,10 @@ bootEventsListener()
     .then(() => log.info('boot', 'Events listener started'))
     .catch((err) => {
     log.error('boot', 'Events listener failed to start', { error: err?.message });
-    // Don't exit — the rest of the API can still serve. SSE will be
-    // degraded but recoverable on restart.
 });
+if (!process.env.PUBLIC_BASE_URL) {
+    log.error('boot', '⚠️  PUBLIC_BASE_URL is not set — Postmark and BoldSign webhooks will point at a stale URL. Set it to your named cloudflared tunnel URL (local) or Cloud Run URL (prod) before running a live demo.');
+}
 console.log(`Server is running on port ${port}`);
 serve({
     fetch: app.fetch,

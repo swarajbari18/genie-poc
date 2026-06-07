@@ -41,7 +41,7 @@ export const auth = betterAuth({
   // Local dev uses http so secure must be false; production uses https so both flags are needed.
   advanced: {
     defaultCookieAttributes: process.env.NODE_ENV === 'production'
-      ? { sameSite: 'none', secure: true }
+      ? { sameSite: 'lax', secure: true, domain: process.env.COOKIE_DOMAIN }
       : { sameSite: 'lax', secure: false },
   },
 

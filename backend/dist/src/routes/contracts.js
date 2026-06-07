@@ -1,12 +1,13 @@
 import { Hono } from 'hono';
 import { requireAuth } from '../middleware/auth.js';
-import { contractsBucket, generateDownloadSignedUrl } from '../lib/storage.js';
+import { contractsBucket, generateDownloadSignedUrl, GcsSigningError } from '../lib/storage.js';
+import { htmlToPdf, buildHtmlShell } from '../services/pdfGenerate.js';
 import { sendContractEmail, sendReplyEmail } from '../services/postmarkClient.js';
 import { createEmbeddedPrepareRequest, getEmbeddedSignUrl, } from '../services/boldsignClient.js';
 import { db } from '../db/client.js';
 import { contracts, contractThreads, contractSigners, contractVersions, reviewSessions, serviceEmails, } from '../db/schema.js';
 import { eq, and, desc, asc, sql, inArray } from 'drizzle-orm';
-import { getServiceEmailByUserId } from '../services/serviceEmail.js';
+import { getServiceEmailByUserId, resolveDeliveryAddress } from '../services/serviceEmail.js';
 import { rememberContact } from '../services/contacts.js';
 import { extractPdfText } from '../services/textExtract.js';
 import { log } from '../lib/logger.js';
@@ -189,7 +190,8 @@ contractsRouter.get('/:id', requireAuth, async (c) => {
       c.created_at          AS "createdAt",
       c.updated_at          AS "updatedAt",
       t_agg.threads,
-      s_agg.signers
+      s_agg.signers,
+      v_agg.versions
     FROM contracts c
     LEFT JOIN LATERAL (
       SELECT COALESCE(
@@ -234,6 +236,25 @@ contractsRouter.get('/:id', requireAuth, async (c) => {
       FROM contract_signers s
       WHERE s.contract_id = c.id
     ) s_agg ON true
+    LEFT JOIN LATERAL (
+      SELECT COALESCE(
+        json_agg(
+          jsonb_build_object(
+            'id',            v.id,
+            'versionNumber', v.version_number,
+            'authoredBy',    v.authored_by,
+            'text',          v.text,
+            'htmlContent',   v.html_content,
+            'storageKey',    v.storage_key,
+            'message',       v.message,
+            'createdAt',     v.created_at
+          ) ORDER BY v.version_number ASC
+        ),
+        '[]'::json
+      ) AS versions
+      FROM contract_versions v
+      WHERE v.contract_id = c.id
+    ) v_agg ON true
     WHERE c.id = ${contractId}
       AND (
         c.user_id = ${user.id}
@@ -248,6 +269,22 @@ contractsRouter.get('/:id', requireAuth, async (c) => {
     if (rows.length === 0)
         return c.json({ error: 'Not found' }, 404);
     const row = rows[0];
+    // A3: resolve relay address → real identity email so the UI never shows @mail.usetend.in
+    let recipientIdentityEmail = null;
+    const MAIL_DOMAIN = process.env.MAIL_DOMAIN ?? '';
+    if (MAIL_DOMAIN && row.recipientEmail?.toLowerCase().endsWith(`@${MAIL_DOMAIN}`)) {
+        const byService = await db.query.serviceEmails.findFirst({
+            where: eq(serviceEmails.address, row.recipientEmail.toLowerCase()),
+        });
+        if (byService) {
+            const ownerRows = await db.execute(sql `
+        SELECT email FROM "user" WHERE id = ${byService.userId} LIMIT 1
+      `);
+            if (ownerRows.length > 0) {
+                recipientIdentityEmail = ownerRows[0].email;
+            }
+        }
+    }
     const contract = {
         id: row.id,
         userId: row.userId,
@@ -269,18 +306,80 @@ contractsRouter.get('/:id', requireAuth, async (c) => {
         aiAnalysis: row.aiAnalysis,
         createdAt: row.createdAt,
         updatedAt: row.updatedAt,
+        recipientIdentityEmail,
     };
+    let documentUrl = null;
+    try {
+        // Serve the signed PDF when available — it is the canonical document at that stage
+        const storageKey = row.signedStorageKey ?? row.storageKey;
+        documentUrl = await generateDownloadSignedUrl(storageKey, row.originalFilename, 3600, 'inline');
+    }
+    catch {
+        // GCS signing unavailable — frontend falls back to the download link
+    }
+    const signersList = row.signers ?? [];
+    const isOwner = row.userId === user.id;
+    const mySignerEntry = signersList.find((s) => s.genieUserId === user.id);
+    const status = row.status;
+    const origin = row.origin;
+    let nextAction = 'none';
+    if (status === 'draft') {
+        nextAction = 'none';
+    }
+    else if (['sent', 'ai_processing'].includes(status) && isOwner) {
+        nextAction = 'awaiting_their_reply';
+    }
+    else if (origin === 'received' && ['received', 'replied', 'negotiating'].includes(status)) {
+        nextAction = 'awaiting_your_review';
+    }
+    else if (['replied', 'negotiating'].includes(status) && isOwner) {
+        nextAction = 'ready_to_send_signature';
+    }
+    else if (['out_for_signature', 'partially_signed'].includes(status) && mySignerEntry && mySignerEntry.status !== 'signed') {
+        nextAction = 'awaiting_you_sign';
+    }
+    else if (['out_for_signature', 'partially_signed'].includes(status)) {
+        nextAction = 'awaiting_them_sign';
+    }
+    else if (['signed', 'completed'].includes(status)) {
+        nextAction = 'executed';
+    }
+    else if (status === 'declined') {
+        nextAction = 'declined';
+    }
     return c.json({
         contract,
         threads: row.threads ?? [],
         signers: row.signers ?? [],
+        versions: row.versions ?? [],
+        documentUrl,
+        nextAction,
     });
 });
 contractsRouter.post('/:id/send', requireAuth, async (c) => {
     const user = c.get('user');
     const contractId = c.req.param('id');
-    const { recipientName, recipientEmail } = await c.req.json();
-    log.info('contracts', 'Send requested', { contractId, recipientEmail, userId: user.id });
+    const body = await c.req.json();
+    // Accept either the legacy single-recipient shape or the new multi-recipient array.
+    let recipients;
+    if (Array.isArray(body.recipients)) {
+        recipients = body.recipients;
+    }
+    else if (body.recipientEmail) {
+        recipients = [{ name: body.recipientName ?? body.recipientEmail, email: body.recipientEmail }];
+    }
+    else {
+        return c.json({ error: 'recipients required' }, 400);
+    }
+    if (recipients.length === 0)
+        return c.json({ error: 'At least one recipient required' }, 400);
+    if (recipients.length > 10)
+        return c.json({ error: 'Maximum 10 recipients' }, 400);
+    for (const r of recipients) {
+        if (!r.email?.trim())
+            return c.json({ error: 'Each recipient must have an email' }, 400);
+    }
+    log.info('contracts', 'Send requested', { contractId, recipientCount: recipients.length, userId: user.id });
     const contract = await db.query.contracts.findFirst({
         where: and(eq(contracts.id, contractId), eq(contracts.userId, user.id)),
     });
@@ -293,71 +392,85 @@ contractsRouter.post('/:id/send', requireAuth, async (c) => {
         log.warn('contracts', 'Send rejected — service email not provisioned', { userId: user.id });
         return c.json({ error: 'Service email not provisioned' }, 400);
     }
-    // Subject is always derived from the contract title, never from the filename.
     const subject = `${contract.title} — Review Requested`;
-    // Create review session so the counterparty gets a workspace link
-    const reviewToken = crypto.randomUUID();
     const latestVersion = await db.query.contractVersions.findFirst({
         where: eq(contractVersions.contractId, contractId),
         orderBy: [asc(contractVersions.versionNumber)],
     });
-    await db.insert(reviewSessions).values({
-        contractId,
-        token: reviewToken,
-        counterpartyEmail: recipientEmail,
-        status: 'active',
-        baseVersionId: latestVersion?.id ?? null,
-        workingText: latestVersion?.text ?? null,
-    });
     const frontendUrl = process.env.FRONTEND_URL ?? 'https://app.genieai.co';
-    const reviewUrl = `${frontendUrl}/review/${reviewToken}`;
-    // Re-read PDF from GCS to attach
+    // Re-read PDF from GCS once — shared across all recipient emails.
     const [fileContents] = await contractsBucket.file(contract.storageKey).download();
     const pdfBase64 = fileContents.toString('base64');
-    const { messageId } = await sendContractEmail({
-        fromAddress,
-        toAddress: recipientEmail,
-        toName: recipientName,
-        subject,
-        contractId,
-        contractTitle: contract.title,
-        senderName: user.name ?? user.email,
-        recipientName: recipientName ?? recipientEmail,
-        pdfBase64,
-        pdfFilename: contract.originalFilename,
-        reviewUrl,
-    });
+    const sentMessageIds = [];
+    for (const recipient of recipients) {
+        // If the recipient is a Genie user, deliver to their service address so the
+        // email stays on-domain while Postmark is pending approval. Falls back to
+        // the original address for non-Genie recipients.
+        const deliveryAddress = await resolveDeliveryAddress(recipient.email);
+        // Each recipient gets their own review session (private workspace + unique link).
+        const reviewToken = crypto.randomUUID();
+        await db.insert(reviewSessions).values({
+            contractId,
+            token: reviewToken,
+            counterpartyEmail: recipient.email,
+            status: 'active',
+            baseVersionId: latestVersion?.id ?? null,
+            workingText: latestVersion?.text ?? null,
+        });
+        const reviewUrl = `${frontendUrl}/review/${reviewToken}`;
+        const { messageId } = await sendContractEmail({
+            fromAddress,
+            toAddress: deliveryAddress,
+            toName: recipient.name,
+            subject,
+            contractId,
+            contractTitle: contract.title,
+            senderName: user.name ?? user.email,
+            recipientName: recipient.name || recipient.email,
+            pdfBase64,
+            pdfFilename: contract.originalFilename,
+            reviewUrl,
+        });
+        sentMessageIds.push(messageId);
+        // Each outbound email is a row in the shared thread — same contractId.
+        await db.insert(contractThreads).values({
+            contractId,
+            direction: 'outbound',
+            postmarkMessageId: messageId,
+            fromAddress,
+            toAddress: deliveryAddress,
+            subject,
+            emailDate: new Date(),
+        });
+        await rememberContact(user.id, {
+            name: recipient.name,
+            email: recipient.email,
+            source: 'review',
+        });
+    }
+    // Use the first recipient as the primary display values on the contract row.
+    const primary = recipients[0];
     await db.update(contracts)
         .set({
         status: 'sent',
-        postmarkMessageId: messageId,
-        recipientEmail,
-        recipientName,
+        postmarkMessageId: sentMessageIds[0],
+        recipientEmail: primary.email,
+        recipientName: primary.name,
+        recipients,
         subject,
         sentAt: new Date(),
-        updatedAt: new Date()
+        updatedAt: new Date(),
     })
         .where(eq(contracts.id, contractId));
-    await db.insert(contractThreads).values({
-        contractId,
-        direction: 'outbound',
-        postmarkMessageId: messageId,
-        fromAddress,
-        toAddress: recipientEmail,
-        subject,
-        emailDate: new Date(),
-    });
-    await rememberContact(user.id, {
-        name: recipientName,
-        email: recipientEmail,
-        source: 'review',
-    });
-    // Component 6 — push the live status update to any open dashboard/page.
     notifyUser(user.id, { contractId, status: 'sent' }).catch((err) => {
         log.error('contracts', 'notifyUser failed after send', { error: err?.message });
     });
-    log.info('contracts', 'Contract sent via Postmark', { contractId, messageId, fromAddress, recipientEmail });
-    return c.json({ ok: true, messageId });
+    log.info('contracts', 'Contract sent via Postmark', {
+        contractId,
+        recipientCount: recipients.length,
+        fromAddress,
+    });
+    return c.json({ ok: true, messageId: sentMessageIds[0] });
 });
 /**
  * POST /:id/reply — Component 5, the in-thread reply / negotiation loop.
@@ -533,7 +646,15 @@ contractsRouter.get('/:id/download-url', requireAuth, async (c) => {
         if (!signerRow)
             return c.json({ error: 'Not found' }, 404);
     }
-    const url = await generateDownloadSignedUrl(contract.storageKey, contract.originalFilename);
+    let url;
+    try {
+        url = await generateDownloadSignedUrl(contract.storageKey, contract.originalFilename, 3600, 'inline');
+    }
+    catch (err) {
+        if (err instanceof GcsSigningError)
+            return c.json({ error: 'Document signing unavailable — check server credentials' }, 503);
+        throw err;
+    }
     c.header('Cache-Control', 'no-store');
     return c.json({ url, expiresIn: 3600 });
 });
@@ -757,16 +878,70 @@ contractsRouter.get('/:id/signed-document', requireAuth, async (c) => {
     return c.json({ url, expiresIn: 3600 });
 });
 /**
+ * PATCH /api/contracts/:id/html
+ * Saves edited HTML for a draft AI-generated contract and regenerates its PDF.
+ * Only the owner can call this, and only while status === 'draft'.
+ */
+contractsRouter.patch('/:id/html', requireAuth, async (c) => {
+    const user = c.get('user');
+    const contractId = c.req.param('id');
+    const body = await c.req.json().catch(() => null);
+    if (!body?.htmlContent || typeof body.htmlContent !== 'string') {
+        return c.json({ error: 'htmlContent required' }, 400);
+    }
+    const contract = await db.query.contracts.findFirst({
+        where: and(eq(contracts.id, contractId), eq(contracts.userId, user.id)),
+    });
+    if (!contract)
+        return c.json({ error: 'Not found' }, 404);
+    if (contract.status !== 'draft')
+        return c.json({ error: 'Only draft contracts can be edited' }, 409);
+    const v1 = await db.query.contractVersions.findFirst({
+        where: and(eq(contractVersions.contractId, contractId), eq(contractVersions.versionNumber, 1)),
+    });
+    if (!v1)
+        return c.json({ error: 'Version 1 not found' }, 404);
+    const fullHtml = buildHtmlShell(contract.title, body.htmlContent);
+    const pdfBuffer = await htmlToPdf(fullHtml);
+    await contractsBucket.file(contract.storageKey).save(pdfBuffer, {
+        metadata: { contentType: 'application/pdf' },
+        resumable: false,
+    });
+    const plainText = body.htmlContent
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/\s{2,}/g, ' ')
+        .trim();
+    await db.update(contractVersions)
+        .set({ htmlContent: body.htmlContent, text: plainText, updatedAt: new Date() })
+        .where(eq(contractVersions.id, v1.id));
+    await db.update(contracts)
+        .set({ fileSizeBytes: pdfBuffer.byteLength, updatedAt: new Date() })
+        .where(eq(contracts.id, contractId));
+    log.info('contracts', 'HTML edited and PDF regenerated', { contractId, userId: user.id });
+    return c.json({ ok: true });
+});
+/**
  * GET /api/contracts/:id/versions
  * Returns the version history for a contract (owner only).
  */
 contractsRouter.get('/:id/versions', requireAuth, async (c) => {
     const user = c.get('user');
     const contractId = c.req.param('id');
-    const contract = await db.query.contracts.findFirst({
-        where: and(eq(contracts.id, contractId), eq(contracts.userId, user.id)),
-    });
-    if (!contract)
+    // Mirror the GET /:id auth: allow owner OR signer/participant
+    const rows = await db.execute(sql `
+    SELECT c.id FROM contracts c
+    WHERE c.id = ${contractId}
+      AND (
+        c.user_id = ${user.id}
+        OR EXISTS (
+          SELECT 1 FROM contract_signers cs
+          WHERE cs.contract_id = c.id
+            AND cs.genie_user_id = ${user.id}
+            AND cs.status IN ('pending', 'sent', 'viewed', 'signed', 'declined')
+        )
+      )
+  `);
+    if (rows.length === 0)
         return c.json({ error: 'Not found' }, 404);
     const versions = await db.query.contractVersions.findMany({
         where: eq(contractVersions.contractId, contractId),

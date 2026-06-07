@@ -1,0 +1,8 @@
+{
+	"name": "genie-api-proxy",
+	"main": "src/index.js",
+	"compatibility_date": "2026-06-06",
+	"routes": [
+		{ "pattern": "genie-api.usetend.in/*", "zone_name": "usetend.in" }
+	]
+}

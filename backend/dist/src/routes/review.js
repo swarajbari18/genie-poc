@@ -2,11 +2,104 @@ import { Hono } from 'hono';
 import { db } from '../db/client.js';
 import { reviewSessions, reviewMessages, contractVersions, contracts, contractThreads, } from '../db/schema.js';
 import { eq, and, desc, asc, sql } from 'drizzle-orm';
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import { GoogleGenerativeAI, SchemaType } from '@google/generative-ai';
 import { log } from '../lib/logger.js';
 import { notifyUser } from '../lib/events.js';
 import { getServiceEmailByUserId } from '../services/serviceEmail.js';
 import { sendReviewSubmittedEmail } from '../services/postmarkClient.js';
+// ── Document editing tools ───────────────────────────────────────────────────
+const TOOL_DECLARATIONS = [
+    {
+        name: 'replace_text',
+        description: 'Find an exact string in the contract and replace it with new text. Use this for targeted word, phrase, or clause changes.',
+        parameters: {
+            type: SchemaType.OBJECT,
+            properties: {
+                find: { type: SchemaType.STRING, description: 'Exact text to find (copy verbatim from the contract)' },
+                replace: { type: SchemaType.STRING, description: 'Text to put in its place' },
+            },
+            required: ['find', 'replace'],
+        },
+    },
+    {
+        name: 'replace_section',
+        description: 'Replace an entire numbered section identified by its heading (e.g. "8. GOVERNING LAW").',
+        parameters: {
+            type: SchemaType.OBJECT,
+            properties: {
+                section: { type: SchemaType.STRING, description: 'Section heading or number as it appears in the contract' },
+                new_content: { type: SchemaType.STRING, description: 'Full replacement text for this section, including the heading' },
+            },
+            required: ['section', 'new_content'],
+        },
+    },
+    {
+        name: 'insert_clause',
+        description: 'Insert a new clause immediately after a named section.',
+        parameters: {
+            type: SchemaType.OBJECT,
+            properties: {
+                after_section: { type: SchemaType.STRING, description: 'Heading of the section to insert after' },
+                clause_text: { type: SchemaType.STRING, description: 'Full text of the new clause to insert, including its heading' },
+            },
+            required: ['after_section', 'clause_text'],
+        },
+    },
+    {
+        name: 'delete_section',
+        description: 'Remove an entire section from the contract.',
+        parameters: {
+            type: SchemaType.OBJECT,
+            properties: {
+                section: { type: SchemaType.STRING, description: 'Section heading or number to delete' },
+            },
+            required: ['section'],
+        },
+    },
+];
+function applyTool(text, toolName, args) {
+    const isSectionHeading = (line) => /^\d+\./.test(line.trim()) || /^[A-Z][A-Z\s.,()-]{4,}$/.test(line.trim());
+    if (toolName === 'replace_text') {
+        const { find, replace } = args;
+        if (!text.includes(find))
+            return { success: false, newText: text, message: 'Text not found — try a shorter verbatim quote from the contract' };
+        return { success: true, newText: text.replace(find, replace), message: 'replaced' };
+    }
+    if (toolName === 'replace_section') {
+        const { section, new_content } = args;
+        const lines = text.split('\n');
+        const startIdx = lines.findIndex(l => l.toLowerCase().includes(section.toLowerCase()));
+        if (startIdx === -1)
+            return { success: false, newText: text, message: 'Section not found' };
+        const endIdx = lines.findIndex((l, i) => i > startIdx + 1 && isSectionHeading(l));
+        const before = lines.slice(0, startIdx).join('\n');
+        const after = endIdx === -1 ? '' : '\n' + lines.slice(endIdx).join('\n');
+        return { success: true, newText: before + '\n' + new_content + after, message: 'replaced' };
+    }
+    if (toolName === 'insert_clause') {
+        const { after_section, clause_text } = args;
+        const lines = text.split('\n');
+        const startIdx = lines.findIndex(l => l.toLowerCase().includes(after_section.toLowerCase()));
+        const endIdx = startIdx === -1 ? -1
+            : lines.findIndex((l, i) => i > startIdx + 1 && isSectionHeading(l));
+        const insertAt = endIdx === -1 ? lines.length : endIdx;
+        const before = lines.slice(0, insertAt).join('\n');
+        const after = lines.slice(insertAt).join('\n');
+        return { success: true, newText: before + '\n\n' + clause_text + (after ? '\n\n' + after : ''), message: 'inserted' };
+    }
+    if (toolName === 'delete_section') {
+        const { section } = args;
+        const lines = text.split('\n');
+        const startIdx = lines.findIndex(l => l.toLowerCase().includes(section.toLowerCase()));
+        if (startIdx === -1)
+            return { success: false, newText: text, message: 'Section not found' };
+        const endIdx = lines.findIndex((l, i) => i > startIdx + 1 && isSectionHeading(l));
+        const before = lines.slice(0, startIdx).join('\n');
+        const after = endIdx === -1 ? '' : '\n' + lines.slice(endIdx).join('\n');
+        return { success: true, newText: (before + after).replace(/\n{3,}/g, '\n\n'), message: 'deleted' };
+    }
+    return { success: false, newText: text, message: 'Unknown tool' };
+}
 const reviewRouter = new Hono();
 // GET /api/review/:token — load session for the review workspace (public)
 reviewRouter.get('/:token', async (c) => {
@@ -68,7 +161,7 @@ reviewRouter.patch('/:token/text', async (c) => {
         .where(eq(reviewSessions.id, session.id));
     return c.json({ ok: true });
 });
-// POST /api/review/:token/chat — AI-assisted editing
+// POST /api/review/:token/chat — ReAct agent with document editing tools
 reviewRouter.post('/:token/chat', async (c) => {
     const token = c.req.param('token');
     const body = await c.req.json().catch(() => null);
@@ -88,57 +181,80 @@ reviewRouter.post('/:token/chat', async (c) => {
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) {
         const fallback = 'AI assistant is not configured. Make your changes directly in the editor.';
-        await db.insert(reviewMessages).values({
-            reviewSessionId: session.id,
-            role: 'assistant',
-            content: fallback,
-        });
+        await db.insert(reviewMessages).values({ reviewSessionId: session.id, role: 'assistant', content: fallback });
         return c.json({ role: 'assistant', content: fallback, suggestedText: null });
     }
     const contractText = typeof body.currentText === 'string' ? body.currentText : session.workingText ?? '';
+    // Build chat history from previous messages (all except the one we just inserted)
+    const allMessages = await db.query.reviewMessages.findMany({
+        where: eq(reviewMessages.reviewSessionId, session.id),
+        orderBy: [asc(reviewMessages.createdAt)],
+    });
+    const historyMessages = allMessages.slice(0, -1);
+    // Convert to Gemini Content format, collapsing consecutive same-role messages
+    const history = [];
+    for (const msg of historyMessages) {
+        const role = msg.role === 'user' ? 'user' : 'model';
+        if (history.length > 0 && history[history.length - 1].role === role)
+            continue;
+        history.push({ role, parts: [{ text: msg.content }] });
+    }
+    // Gemini requires history to start with a user turn
+    while (history.length > 0 && history[0].role !== 'user')
+        history.shift();
     try {
         const genAI = new GoogleGenerativeAI(apiKey);
-        const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash-lite-preview-06-17' });
-        const prompt = `You are a contract negotiation assistant. The user is reviewing a contract and wants to propose a specific change. Apply their request to the full contract text and return it.
+        const model = genAI.getGenerativeModel({
+            model: 'gemini-2.5-flash-lite',
+            systemInstruction: `You are a contract review assistant. A counterparty is reviewing the following contract and may ask questions or request changes.
 
-CONTRACT TEXT:
+CONTRACT:
 ${contractText}
 
-USER REQUEST: ${body.message}
-
-Respond in EXACTLY this format — no other text:
-EXPLANATION: [1-2 sentences describing what you changed]
-UPDATED_TEXT:
-[complete updated contract text with the change applied]`;
-        const result = await Promise.race([
-            model.generateContent(prompt),
-            new Promise((_, reject) => setTimeout(() => reject(new Error('AI timeout')), 30000)),
-        ]);
-        const raw = result.response.text();
-        const explanationMatch = raw.match(/^EXPLANATION:\s*(.+?)(?=\nUPDATED_TEXT:)/s);
-        const updatedTextMatch = raw.match(/UPDATED_TEXT:\s*\n([\s\S]+)$/);
-        const explanation = explanationMatch?.[1]?.trim() ?? 'Here is the updated contract with your changes applied.';
-        const suggestedText = updatedTextMatch?.[1]?.trim() ?? null;
+Rules:
+- Answer questions conversationally without calling any tool.
+- When the user requests a change, use the available tools to apply it. You may call multiple tools for a single request.
+- After applying changes, confirm briefly what you changed.
+- Never rewrite the full contract in your text reply — use tools for edits.`,
+            tools: [{ functionDeclarations: TOOL_DECLARATIONS }],
+        });
+        const chat = model.startChat({ history });
+        let response = await chat.sendMessage(body.message);
+        let proposedText = contractText;
+        // ReAct loop — execute tool calls until the model gives a plain text reply
+        for (let i = 0; i < 6; i++) {
+            const calls = response.response.functionCalls();
+            if (!calls || calls.length === 0)
+                break;
+            const toolResults = calls.map((call) => {
+                const result = applyTool(proposedText, call.name, call.args);
+                if (result.success)
+                    proposedText = result.newText;
+                log.info('review', 'Tool call', { tool: call.name, success: result.success, sessionId: session.id });
+                return {
+                    functionResponse: {
+                        name: call.name,
+                        response: { result: result.message },
+                    },
+                };
+            });
+            response = await chat.sendMessage(toolResults);
+        }
+        const explanation = response.response.text();
+        const suggestedText = proposedText !== contractText ? proposedText : null;
         await db.insert(reviewMessages).values({
             reviewSessionId: session.id,
             role: 'assistant',
             content: explanation,
             suggestedText,
         });
-        log.info('review', 'AI suggestion generated', {
-            sessionId: session.id,
-            hasSuggestion: !!suggestedText,
-        });
+        log.info('review', 'Agent response', { sessionId: session.id, usedTools: suggestedText !== null });
         return c.json({ role: 'assistant', content: explanation, suggestedText });
     }
     catch (err) {
-        log.error('review', 'AI chat failed', { sessionId: session.id, error: err?.message });
+        log.error('review', 'Agent failed', { sessionId: session.id, error: err?.message });
         const msg = 'Sorry, I could not process that. Please try again or edit directly.';
-        await db.insert(reviewMessages).values({
-            reviewSessionId: session.id,
-            role: 'assistant',
-            content: msg,
-        });
+        await db.insert(reviewMessages).values({ reviewSessionId: session.id, role: 'assistant', content: msg });
         return c.json({ role: 'assistant', content: msg, suggestedText: null });
     }
 });

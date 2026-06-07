@@ -1,6 +1,6 @@
 import { db } from '../db/client.js';
-import { contracts, contractThreads } from '../db/schema.js';
-import { eq, and, lt, desc } from 'drizzle-orm';
+import { contracts, contractThreads, contractVersions } from '../db/schema.js';
+import { eq, and, lt, desc, asc } from 'drizzle-orm';
 import { contractsBucket } from '../lib/storage.js';
 import { notifyUser } from '../lib/events.js';
 import { log } from '../lib/logger.js';
@@ -142,7 +142,7 @@ export async function runDiffAnalysis({ contractId, ownerUserId, newThreadId, ne
             try {
                 log.info('aiAnalysis', 'Generating LLM summary');
                 const genAI = new GoogleGenerativeAI(apiKey);
-                const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash-lite-preview-06-17' });
+                const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash-lite' });
                 const prompt = `You summarize contract edits for a non-lawyer. You are given ONLY a diff (added/removed text). Summarize ONLY changes present in the diff. Do not infer, invent, or comment on anything not in the diff. Output 1–5 short bullet points in plain English (e.g. 'Payment term changed from 30 to 45 days'). If the diff is trivial or empty, say so.
 
 Diff:
@@ -153,7 +153,7 @@ ${JSON.stringify(patch.hunks.map(h => h.lines).flat(), null, 2)}`;
                 ]);
                 summary = result.response.text();
                 summaryStatus = 'ok';
-                modelName = 'gemini-2.5-flash-lite-preview-06-17';
+                modelName = 'gemini-2.5-flash-lite';
             }
             catch (err) {
                 log.error('aiAnalysis', 'LLM summary failed', { error: err.message });
@@ -204,4 +204,75 @@ ${JSON.stringify(patch.hunks.map(h => h.lines).flat(), null, 2)}`;
             .catch(() => { }); // Ignore secondary failure
         await notifyUser(ownerUserId, { contractId, status: 'replied' });
     }
+}
+export async function runTextReplyAnalysis({ contractId, ownerUserId, replyText, }) {
+    log.info('aiAnalysis', 'Starting text reply analysis', { contractId });
+    const v1 = await db.query.contractVersions.findFirst({
+        where: eq(contractVersions.contractId, contractId),
+        orderBy: [asc(contractVersions.versionNumber)],
+    });
+    const contractText = v1?.text ?? '';
+    const contractSnippet = contractText.slice(0, 3000);
+    let sentiment = 'modify';
+    let changes = [];
+    let summary = '';
+    let summaryStatus = 'skipped_no_key';
+    let modelName = null;
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (apiKey) {
+        try {
+            const genAI = new GoogleGenerativeAI(apiKey);
+            const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash-lite' });
+            const prompt = `You are a legal assistant. A counterparty has replied to a contract negotiation.
+
+CONTRACT (excerpt):
+${contractSnippet}
+
+COUNTERPARTY'S MESSAGE:
+${replyText}
+
+Respond with JSON only (no markdown fences):
+{
+  "sentiment": "accept" | "modify" | "reject" | "question",
+  "changes": ["change 1", "change 2"],
+  "summary": "one sentence summary"
+}
+
+Rules:
+- "accept": they agree as-is. "reject": they decline. "modify": they want specific changes. "question": asking for clarification.
+- changes: only for "modify" sentiment. Concrete and specific (e.g. "Extend term from 1 year to 2 years"). Max 5 items. Empty array otherwise.
+- summary: plain English for a non-lawyer, one sentence.`;
+            const result = await Promise.race([
+                model.generateContent(prompt),
+                new Promise((_, reject) => setTimeout(() => reject(new Error('LLM timeout')), 15000)),
+            ]);
+            const raw = result.response.text().trim().replace(/^```json\n?/, '').replace(/\n?```$/, '');
+            const parsed = JSON.parse(raw);
+            sentiment = parsed.sentiment ?? 'modify';
+            changes = Array.isArray(parsed.changes) ? parsed.changes : [];
+            summary = parsed.summary ?? '';
+            summaryStatus = 'ok';
+            modelName = 'gemini-2.5-flash-lite';
+        }
+        catch (err) {
+            log.error('aiAnalysis', 'Text reply LLM failed', { contractId, error: err.message });
+            summaryStatus = 'failed';
+        }
+    }
+    const analysis = {
+        type: 'text_reply',
+        message: replyText,
+        sentiment,
+        changes,
+        summary,
+        summaryStatus,
+        model: modelName,
+        generatedAt: new Date().toISOString(),
+    };
+    await db
+        .update(contracts)
+        .set({ aiAnalysis: analysis, updatedAt: new Date() })
+        .where(eq(contracts.id, contractId));
+    await notifyUser(ownerUserId, { contractId, status: 'replied' });
+    log.info('aiAnalysis', 'Text reply analysis complete', { contractId, sentiment });
 }

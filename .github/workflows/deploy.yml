@@ -1,35 +1,57 @@
-# name: Deploy
+name: Deploy
 
-# on:
-#   push:
-#     branches: [main]
+on:
+  push:
+    branches: [main]
 
-# jobs:
-#   deploy-backend:
-#     runs-on: ubuntu-latest
-#     steps:
-#       - uses: actions/checkout@v4
-#       - uses: google-github-actions/auth@v2
-#         with:
-#           credentials_json: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
-#       - uses: google-github-actions/setup-gcloud@v2
-#       - run: |
-#           cd backend
-#           gcloud builds submit --tag gcr.io/${{ secrets.GCP_PROJECT_ID }}/backend:${{ github.sha }}
-#           gcloud run deploy backend \
-#             --image gcr.io/${{ secrets.GCP_PROJECT_ID }}/backend:${{ github.sha }} \
-#             --region us-central1 \
-#             --platform managed
+jobs:
+  deploy-backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
 
-#   deploy-frontend:
-#     runs-on: ubuntu-latest
-#     steps:
-#       - uses: actions/checkout@v4
-#       - uses: actions/setup-node@v4
-#         with:
-#           node-version: '20'
-#       - run: cd frontend && npm ci && npm run build
-#       - uses: cloudflare/wrangler-action@v3
-#         with:
-#           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-#           workingDirectory: frontend
+      - uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Authenticate Docker to Artifact Registry
+        run: gcloud auth configure-docker europe-west2-docker.pkg.dev --quiet
+
+      - name: Build and push backend image
+        run: |
+          cd backend
+          docker build \
+            --build-arg BASE_IMAGE=europe-west2-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/genie-backend/base:1 \
+            -t europe-west2-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/genie-backend/backend:${{ github.sha }} .
+          docker push europe-west2-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/genie-backend/backend:${{ github.sha }}
+
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy genie-backend \
+            --image europe-west2-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/genie-backend/backend:${{ github.sha }} \
+            --region europe-west2 \
+            --platform managed \
+            --allow-unauthenticated
+
+  deploy-frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Build frontend
+        run: |
+          cd frontend
+          echo "PUBLIC_API_URL=https://YOUR_CLOUDRUN_URL" > .env.production
+          npm ci
+          npm run build
+
+      - uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          workingDirectory: frontend

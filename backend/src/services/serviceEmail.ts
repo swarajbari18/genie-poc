@@ -1,7 +1,7 @@
 import { customAlphabet } from 'nanoid'
 import { db } from '../db/client.js'
 import { serviceEmails } from '../db/schema.js'
-import { eq } from 'drizzle-orm'
+import { eq, sql } from 'drizzle-orm'
 import { log } from '../lib/logger.js'
 
 const nanoid = customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 6)
@@ -78,4 +78,39 @@ export async function getServiceEmailByUserId(
     where: eq(serviceEmails.userId, userId),
   })
   return row?.address ?? null
+}
+
+/**
+ * Resolve the actual delivery address for a recipient.
+ *
+ * - Already a service address (@mail.usetend.in) → return as-is.
+ * - Identity email (e.g. Gmail) → look up matching Genie user and return
+ *   their service address, so the email stays on-domain while Postmark is
+ *   pending approval.
+ * - Identity email with no matching Genie account → return the original
+ *   address (correct behaviour once Postmark approves external sending).
+ */
+export async function resolveDeliveryAddress(identityEmail: string): Promise<string> {
+  const domain = process.env.MAIL_DOMAIN!
+  if (identityEmail.toLowerCase().endsWith(`@${domain}`)) {
+    return identityEmail
+  }
+
+  // Look up a Genie user whose sign-in email matches.
+  const rows = await db.execute(
+    sql`SELECT id FROM "user" WHERE lower(email) = ${identityEmail.toLowerCase()} LIMIT 1`
+  )
+  const userId = (rows as unknown as Array<{ id: string }>)[0]?.id
+  if (!userId) return identityEmail
+
+  const serviceAddress = await getServiceEmailByUserId(userId)
+  if (serviceAddress) {
+    log.info('serviceEmail', 'Resolved identity email to service address', {
+      identityEmail,
+      serviceAddress,
+    })
+    return serviceAddress
+  }
+
+  return identityEmail
 }

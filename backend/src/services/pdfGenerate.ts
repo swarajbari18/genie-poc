@@ -1,4 +1,27 @@
 import puppeteer from 'puppeteer'
+import { readFileSync } from 'fs'
+import { fileURLToPath } from 'url'
+import { dirname, join } from 'path'
+
+const __dirname = dirname(fileURLToPath(import.meta.url))
+const interB64      = readFileSync(join(__dirname, '../fonts/inter-latin.woff2')).toString('base64')
+const playfairB64   = readFileSync(join(__dirname, '../fonts/playfair-latin-700.woff2')).toString('base64')
+
+const FONT_FACE_CSS = `
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url('data:font/woff2;base64,${interB64}') format('woff2');
+}
+@font-face {
+  font-family: 'Playfair Display';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('data:font/woff2;base64,${playfairB64}') format('woff2');
+}`
 
 export async function htmlToPdf(html: string): Promise<Buffer> {
   const browser = await puppeteer.launch({
@@ -7,7 +30,7 @@ export async function htmlToPdf(html: string): Promise<Buffer> {
   })
   try {
     const page = await browser.newPage()
-    await page.setContent(html, { waitUntil: 'networkidle0', timeout: 30000 })
+    await page.setContent(html, { waitUntil: 'load', timeout: 30000 })
     const pdf = await page.pdf({
       format: 'A4',
       margin: { top: '20mm', right: '22mm', bottom: '20mm', left: '22mm' },
@@ -49,7 +72,7 @@ export function buildHtmlShell(title: string, bodyHtml: string): string {
 <head>
 <meta charset="UTF-8">
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Playfair+Display:wght@700&display=swap');
+  ${FONT_FACE_CSS}
 
   *, *::before, *::after { box-sizing: border-box; }
 

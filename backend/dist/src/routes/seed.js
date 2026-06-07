@@ -4,8 +4,7 @@ import { db } from '../db/client.js';
 import { projects, contracts, contractVersions, reviewSessions } from '../db/schema.js';
 import { eq } from 'drizzle-orm';
 import { contractsBucket } from '../lib/storage.js';
-import { generateContractPdf } from '../services/pdfGenerate.js';
-import { extractPdfText } from '../services/textExtract.js';
+import { htmlToPdf, contractTextToHtml } from '../services/pdfGenerate.js';
 import { DEMO_PROJECTS } from '../services/demoContracts.js';
 import { log } from '../lib/logger.js';
 const seedRouter = new Hono();
@@ -31,14 +30,12 @@ seedRouter.post('/demo', requireAuth, async (c) => {
         for (const dc of demo.contracts) {
             const contractId = crypto.randomUUID();
             const storageKey = `contracts/${user.id}/${contractId}/original.pdf`;
-            // Generate PDF
-            const pdfBuffer = await generateContractPdf({ title: dc.title, text: dc.text });
+            // Generate HTML → PDF via Puppeteer
+            const html = contractTextToHtml(dc.title, dc.text);
+            const pdfBuffer = await htmlToPdf(html);
             await contractsBucket.file(storageKey).save(pdfBuffer, {
                 metadata: { contentType: 'application/pdf' },
                 resumable: false,
-            });
-            const today = new Date().toLocaleDateString('en-US', {
-                year: 'numeric', month: 'long', day: 'numeric',
             });
             await db.insert(contracts).values({
                 id: contractId,
@@ -54,29 +51,15 @@ seedRouter.post('/demo', requireAuth, async (c) => {
                 subject: `${dc.title} — Review Requested`,
                 sentAt: dc.status !== 'draft' ? new Date() : null,
             });
-            // Version 1 — extract text from the PDF we just generated
-            try {
-                const extractedText = await extractPdfText(pdfBuffer);
-                await db.insert(contractVersions).values({
-                    contractId,
-                    versionNumber: 1,
-                    text: extractedText,
-                    storageKey,
-                    authoredBy: 'owner',
-                    message: 'Original document',
-                });
-            }
-            catch {
-                // Fall back to raw text if extraction fails
-                await db.insert(contractVersions).values({
-                    contractId,
-                    versionNumber: 1,
-                    text: dc.text,
-                    storageKey,
-                    authoredBy: 'owner',
-                    message: 'Original document',
-                });
-            }
+            // Version 1 — store the plain text for diff/review
+            await db.insert(contractVersions).values({
+                contractId,
+                versionNumber: 1,
+                text: dc.text,
+                storageKey,
+                authoredBy: 'owner',
+                message: 'Original document',
+            });
             // If the contract has counterparty changes, create v2 + a submitted review session
             if (dc.counterpartyText && dc.status === 'replied') {
                 const [v1] = await db.query.contractVersions.findMany({

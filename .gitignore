@@ -1,0 +1,14 @@
+.backend-image
+
+# Environment files — never commit secrets
+.env
+.env.*
+!.env.example
+backend/.env.production
+
+# Node
+node_modules/
+
+# Build output
+frontend/dist/
+frontend/.astro/
