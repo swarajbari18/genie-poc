@@ -12,3 +12,6 @@ node_modules/
 # Build output
 frontend/dist/
 frontend/.astro/
+
+# Claude Code project files
+.claude/
